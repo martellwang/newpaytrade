@@ -14,6 +14,13 @@
  *
  * CloseType：1=請款 2=退款 -1=取消請款 -2=取消退款
  *
+ * ⚠️ 呼叫端**不需要自己決定 CloseType**。不帶 closeType 時，這支程式會先向
+ *    PAYUNi 查詢真實的關帳狀態，未請款自動走取消請款、已請款才走退款。
+ *    台灣信用卡是「授權 → 請款 → 退款」三段式，對還沒請款的交易送退款
+ *    會被擋下並回「關帳狀態不符合」，操作者看到那個訊息不會知道要改用
+ *    取消請款 —— 所以由程式判斷，不要讓人去記這層差異。
+ *    仍可帶 closeType 明確指定，處理例外情況時需要。
+ *
  * 官方文件載明的業務限制（程式沒辦法自己判斷，呼叫端要注意）：
  *   - 一次付清、國外卡：可全額退款，也可部分退款
  *   - 分期付款、銀聯卡：僅能全額退款
@@ -24,6 +31,7 @@
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/payuni_crypto.php';
 require_once __DIR__ . '/payuni_error_codes.php';
+require_once __DIR__ . '/payuni_query.php';
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/rate_limit.php';
 
@@ -51,15 +59,17 @@ if ($input === null) {
 }
 
 $merTradeNo = isset($input['merTradeNo']) ? $input['merTradeNo'] : '';
-// closeType 預設 2（退款），這是最常用的情境。平台預設自動請款，所以
-// 一般不需要自己發動 CloseType=1。
-$closeType = isset($input['closeType']) ? (int) $input['closeType'] : 2;
+
+// closeType 沒帶就自動判斷（見下方 decide_close_type）。
+// 帶了就照帶的做 —— 保留人工指定的能力，處理例外情況時需要。
+$closeTypeExplicit = isset($input['closeType']);
+$closeType = $closeTypeExplicit ? (int) $input['closeType'] : null;
 
 if ($merTradeNo === '') {
     respond(400, array('status' => 'failed', 'message' => '缺少 merTradeNo'));
 }
 
-if (!in_array($closeType, array(1, 2, -1, -2), true)) {
+if ($closeTypeExplicit && !in_array($closeType, array(1, 2, -1, -2), true)) {
     respond(400, array('status' => 'failed', 'message' => 'closeType 只能是 1(請款) / 2(退款) / -1(取消請款) / -2(取消退款)'));
 }
 
@@ -93,6 +103,52 @@ if ($order['status'] !== 'success') {
 
 if (empty($order['payuni_trade_no'])) {
     respond(400, array('status' => 'failed', 'message' => '這筆訂單沒有 PAYUNi 交易序號（TradeNo），無法請退款'));
+}
+
+// ---------------------------------------------------------------------------
+// 自動判斷該用「退款」還是「取消請款」
+//
+// 台灣信用卡是三段式：授權 → 請款 → 退款。**還沒請款的交易不能退款**，
+// 硬送 CloseType=2 會被 PAYUNi 擋下並回「關帳狀態不符合」——操作者看到
+// 這個訊息根本不知道要改用取消請款。所以這裡先查一次真實的關帳狀態，
+// 自己挑對的動作。
+//
+// 對未請款的交易來說，取消請款其實比退款更好：款項從頭到尾沒有撥付，
+// 持卡人帳單上不會出現「扣款一筆、退款一筆」兩行紀錄。
+// ---------------------------------------------------------------------------
+$closeStatus = null;
+if (!$closeTypeExplicit) {
+    $queryResult = payuni_fetch_trade_record($merTradeNo);
+    if (!$queryResult['ok']) {
+        respond(502, array(
+            'status' => 'failed',
+            'message' => '無法確認交易的請款狀態，請稍後再試：' . $queryResult['message'],
+        ));
+    }
+    $record = $queryResult['record'];
+    $closeStatus = isset($record['CloseStatus']) ? (string) $record['CloseStatus'] : '';
+
+    // CloseStatus 語意：'1' 與 '3' 是 2026-07-20 實測確認的（取消請款前後
+    // 分別是 1 → 3）；'0' 與 '2' 依 PAYUNi 慣例推定，尚未實測。
+    // 因此**遇到未知值一律拒絕而不是猜**——猜錯會動到真實款項。
+    if ($closeStatus === '2') {
+        $closeType = 2;   // 已請款 → 退款
+    } elseif ($closeStatus === '0' || $closeStatus === '1') {
+        $closeType = -1;  // 未請款／待請款 → 取消請款
+    } elseif ($closeStatus === '3') {
+        respond(400, array(
+            'status' => 'failed',
+            'message' => '這筆交易已經取消請款，款項不會被撥付，不需要再處理。',
+            'closeStatus' => $closeStatus,
+        ));
+    } else {
+        respond(400, array(
+            'status' => 'failed',
+            'message' => "無法判斷這筆交易的請款狀態（CloseStatus={$closeStatus}），"
+                . '為避免誤動款項已中止。請人工確認後改用 closeType 參數明確指定。',
+            'closeStatus' => $closeStatus,
+        ));
+    }
 }
 
 $orderAmount = (int) $order['amount'];
@@ -245,12 +301,18 @@ if ($detailStatus === 'SUCCESS') {
         }
     }
     $totalRefunded = ($closeType === 2) ? db_sum_refunded_amount($conn, $merTradeNo) : null;
+    // 自動判斷時要讓呼叫端知道系統實際做了什麼 —— 「退款」和「取消請款」
+    // 對持卡人帳單的呈現不同，操作者需要能對客人說明。
+    $actionText = ($closeType === 2) ? '退款' : (($closeType === -1) ? '取消請款' : '請款動作');
     respond(200, array(
         'status' => 'success',
         'message' => $message,
         'merTradeNo' => $merTradeNo,
         'payuniTradeNo' => $payuniTradeNo,
         'closeType' => $closeType,
+        'action' => $actionText,
+        'autoDetected' => !$closeTypeExplicit,
+        'closeStatusBefore' => $closeStatus,
         'amount' => $amount,
         'totalRefunded' => $totalRefunded,
         'orderAmount' => $orderAmount,
