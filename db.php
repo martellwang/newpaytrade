@@ -67,11 +67,106 @@ function db_create_refunds_table_if_not_exists($conn) {
     }
 }
 
+/**
+ * 建立 devices 資料表：登記每一台實際在用的收銀機。
+ *
+ * 用途：
+ *   1. 多台機器營運時，可以按機器分別對帳（哪台收了多少）
+ *   2. 出問題時知道是哪台機器、什麼型號、什麼系統版本
+ *   3. 記錄各機型的讀卡能力（實測發現專用 POS 機都沒有標準 NFC，
+ *      這件事值得留在資料裡，換機器時才不會重複踩）
+ *
+ * device_id 用 Android 的 ANDROID_ID（每台裝置對每個 App 固定且不需權限），
+ * 不用 Build.SERIAL —— 那在新版 Android 需要特殊權限而且拿不到。
+ */
+function db_create_devices_table_if_not_exists($conn) {
+    $sql = "
+        CREATE TABLE IF NOT EXISTS devices (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            device_id VARCHAR(64) NOT NULL UNIQUE,
+            brand VARCHAR(64) NULL,
+            manufacturer VARCHAR(64) NULL,
+            model VARCHAR(64) NULL,
+            product VARCHAR(64) NULL,
+            android_version VARCHAR(16) NULL,
+            android_sdk INT NULL,
+            app_version VARCHAR(32) NULL,
+            has_nfc TINYINT(1) NULL,
+            nfc_enabled TINYINT(1) NULL,
+            screen VARCHAR(24) NULL,
+            note VARCHAR(255) NULL,
+            first_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 devices 資料表失敗：' . mysqli_error($conn));
+    }
+
+    // orders 加上 device_id，讓每筆交易可追溯到是哪台機器刷的。
+    // 用 SHOW COLUMNS 判斷再加，這樣重複執行 setup_db.php 不會出錯。
+    $res = mysqli_query($conn, "SHOW COLUMNS FROM orders LIKE 'device_id'");
+    if ($res && mysqli_num_rows($res) === 0) {
+        if (!mysqli_query($conn, "ALTER TABLE orders ADD COLUMN device_id VARCHAR(64) NULL, ADD INDEX idx_device (device_id)")) {
+            throw new Exception('orders 新增 device_id 欄位失敗：' . mysqli_error($conn));
+        }
+    }
+}
+
+/**
+ * 登記或更新一台裝置。每次交易都會呼叫，所以 last_seen 會自動更新，
+ * 可以看出哪些機器還在用、哪些已經沒在用了。
+ */
+function db_upsert_device($conn, $d) {
+    $stmt = mysqli_prepare(
+        $conn,
+        'INSERT INTO devices
+            (device_id, brand, manufacturer, model, product, android_version, android_sdk,
+             app_version, has_nfc, nfc_enabled, screen)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+         ON DUPLICATE KEY UPDATE
+            brand=VALUES(brand), manufacturer=VALUES(manufacturer), model=VALUES(model),
+            product=VALUES(product), android_version=VALUES(android_version),
+            android_sdk=VALUES(android_sdk), app_version=VALUES(app_version),
+            has_nfc=VALUES(has_nfc), nfc_enabled=VALUES(nfc_enabled), screen=VALUES(screen),
+            last_seen=CURRENT_TIMESTAMP'
+    );
+    $sdk = isset($d['androidSdk']) ? (int) $d['androidSdk'] : null;
+    $hasNfc = isset($d['hasNfc']) ? (int) (bool) $d['hasNfc'] : null;
+    $nfcOn = isset($d['nfcEnabled']) ? (int) (bool) $d['nfcEnabled'] : null;
+    // 型別字串要跟參數順序一一對應，錯位不會報錯但會靜默轉型
+    // （曾把 appVersion 標成 i，"0.1-dev" 就被轉成 0）。
+    //        deviceId brand manufacturer model product androidVersion sdk appVersion hasNfc nfcOn screen
+    //        s        s     s            s     s       s              i   s          i      i     s
+    mysqli_stmt_bind_param(
+        $stmt, 'ssssssisiis',
+        $d['deviceId'], $d['brand'], $d['manufacturer'], $d['model'], $d['product'],
+        $d['androidVersion'], $sdk, $d['appVersion'], $hasNfc, $nfcOn, $d['screen']
+    );
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('登記裝置失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 列出所有登記過的裝置，附帶各自的交易統計 */
+function db_list_devices($conn) {
+    $sql = "
+        SELECT d.*,
+               (SELECT COUNT(*) FROM orders o WHERE o.device_id = d.device_id) AS order_cnt,
+               (SELECT COALESCE(SUM(o.amount),0) FROM orders o
+                 WHERE o.device_id = d.device_id AND o.status='success') AS success_amt
+        FROM devices d ORDER BY d.last_seen DESC
+    ";
+    $res = mysqli_query($conn, $sql);
+    return $res ? mysqli_fetch_all($res, MYSQLI_ASSOC) : array();
+}
+
 /** 交易送出前先寫一筆 pending 紀錄，拿到 PAYUNi 回應後再更新 */
-function db_insert_pending_order($conn, $merTradeNo, $amount) {
-    $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status) VALUES (?, ?, ?)');
+function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null) {
+    $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status, device_id) VALUES (?, ?, ?, ?)');
     $status = 'pending';
-    mysqli_stmt_bind_param($stmt, 'sis', $merTradeNo, $amount, $status);
+    mysqli_stmt_bind_param($stmt, 'siss', $merTradeNo, $amount, $status, $deviceId);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('寫入訂單紀錄失敗：' . mysqli_stmt_error($stmt));
     }

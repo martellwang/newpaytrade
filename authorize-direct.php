@@ -61,6 +61,11 @@ if (!is_numeric($amount) || $amount <= 0) {
     respond(400, array('status' => 'failed', 'message' => 'amount 必須是大於 0 的數字'));
 }
 
+// 裝置資訊（選填）。App 每次交易都會帶，用來登記收銀機並讓交易可追溯到
+// 是哪一台刷的。缺少也不擋交易 —— 收款比登記重要。
+$device = isset($input['device']) && is_array($input['device']) ? $input['device'] : null;
+$deviceId = ($device && !empty($device['deviceId'])) ? substr((string) $device['deviceId'], 0, 64) : null;
+
 // 速率限制：一定要在送去 PAYUNi「之前」擋，被擋下的請求不會用掉商店額度、
 // 不會產生手續費，也不會被 PAYUNi 風控記為異常。
 // 資料庫連線在這裡就先開，後面寫訂單紀錄會重複使用。
@@ -109,8 +114,29 @@ try {
 // 交易送出前先記一筆 pending，就算後面連線逾時也有紀錄可查
 // （$conn 在前面做速率限制時已經開好了，沒開成功就是 null）
 if ($conn) {
+    // 登記／更新收銀機。失敗不擋交易，只記 log。
+    if ($device && $deviceId) {
+        try {
+            db_upsert_device($conn, array(
+                'deviceId' => $deviceId,
+                'brand' => isset($device['brand']) ? $device['brand'] : null,
+                'manufacturer' => isset($device['manufacturer']) ? $device['manufacturer'] : null,
+                'model' => isset($device['model']) ? $device['model'] : null,
+                'product' => isset($device['product']) ? $device['product'] : null,
+                'androidVersion' => isset($device['androidVersion']) ? $device['androidVersion'] : null,
+                'androidSdk' => isset($device['androidSdk']) ? $device['androidSdk'] : null,
+                'appVersion' => isset($device['appVersion']) ? $device['appVersion'] : null,
+                'hasNfc' => isset($device['hasNfc']) ? $device['hasNfc'] : null,
+                'nfcEnabled' => isset($device['nfcEnabled']) ? $device['nfcEnabled'] : null,
+                'screen' => isset($device['screen']) ? $device['screen'] : null,
+            ));
+        } catch (Exception $e) {
+            error_log('登記裝置失敗：' . $e->getMessage());
+        }
+    }
+
     try {
-        db_insert_pending_order($conn, $merTradeNo, round($amount));
+        db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId);
     } catch (Exception $e) {
         error_log('寫入 pending 訂單失敗：' . $e->getMessage());
         // 資料庫寫入失敗不擋交易，continue，但要記 log 之後追查

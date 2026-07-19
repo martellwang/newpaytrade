@@ -7,6 +7,6 @@ Options -Indexes
     Require all denied
 </FilesMatch>
 
-<FilesMatch "^(login|logout|index|report|detail|export|download_apk)\.php$">
+<FilesMatch "^(login|logout|index|report|detail|export|devices|download_apk)\.php$">
     Require all granted
 </FilesMatch>
