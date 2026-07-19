@@ -41,6 +41,32 @@ function db_create_orders_table_if_not_exists($conn) {
     }
 }
 
+/**
+ * 建立 refunds 資料表（如果還不存在）。
+ * 用獨立資料表而不是在 orders 加欄位，因為一筆訂單可以分多次部分退款，
+ * 每一次都要留下獨立的紀錄可查。
+ */
+function db_create_refunds_table_if_not_exists($conn) {
+    $sql = "
+        CREATE TABLE IF NOT EXISTS refunds (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            mer_trade_no VARCHAR(25) NOT NULL,
+            payuni_trade_no VARCHAR(64) NOT NULL,
+            close_type INT NOT NULL,
+            amount INT NOT NULL,
+            status VARCHAR(20) NOT NULL,
+            message VARCHAR(255) NULL,
+            raw_response TEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_mer_trade_no (mer_trade_no)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 refunds 資料表失敗：' . mysqli_error($conn));
+    }
+}
+
 /** 交易送出前先寫一筆 pending 紀錄，拿到 PAYUNi 回應後再更新 */
 function db_insert_pending_order($conn, $merTradeNo, $amount) {
     $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status) VALUES (?, ?, ?)');
@@ -84,4 +110,68 @@ function db_find_order($conn, $merTradeNo) {
     $row = mysqli_fetch_assoc($result);
     mysqli_stmt_close($stmt);
     return $row;
+}
+
+/**
+ * 算出這筆訂單「已經成功退掉」的總金額，用來擋住退款總額超過原始金額。
+ * 只計算 status='success' 的退款，pending/failed 不算。
+ */
+function db_sum_refunded_amount($conn, $merTradeNo) {
+    $stmt = mysqli_prepare(
+        $conn,
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM refunds
+         WHERE mer_trade_no = ? AND close_type = 2 AND status = 'success'"
+    );
+    mysqli_stmt_bind_param($stmt, 's', $merTradeNo);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $row = mysqli_fetch_assoc($result);
+    mysqli_stmt_close($stmt);
+    return (int) $row['total'];
+}
+
+/** 退款送出前先寫一筆 pending 紀錄，回傳這筆的 id 供後續更新 */
+function db_insert_pending_refund($conn, $merTradeNo, $payuniTradeNo, $closeType, $amount) {
+    $stmt = mysqli_prepare(
+        $conn,
+        'INSERT INTO refunds (mer_trade_no, payuni_trade_no, close_type, amount, status) VALUES (?, ?, ?, ?, ?)'
+    );
+    $status = 'pending';
+    mysqli_stmt_bind_param($stmt, 'ssiis', $merTradeNo, $payuniTradeNo, $closeType, $amount, $status);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('寫入退款紀錄失敗：' . mysqli_stmt_error($stmt));
+    }
+    $id = mysqli_insert_id($conn);
+    mysqli_stmt_close($stmt);
+    return $id;
+}
+
+/** 收到 PAYUNi 回應後更新退款紀錄 */
+function db_update_refund_result($conn, $refundId, $status, $message, $rawResponse) {
+    $stmt = mysqli_prepare(
+        $conn,
+        'UPDATE refunds SET status = ?, message = ?, raw_response = ? WHERE id = ?'
+    );
+    mysqli_stmt_bind_param($stmt, 'sssi', $status, $message, $rawResponse, $refundId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('更新退款紀錄失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 列出一筆訂單的所有退款紀錄 */
+function db_list_refunds($conn, $merTradeNo) {
+    $stmt = mysqli_prepare(
+        $conn,
+        'SELECT id, close_type, amount, status, message, created_at FROM refunds WHERE mer_trade_no = ? ORDER BY id'
+    );
+    mysqli_stmt_bind_param($stmt, 's', $merTradeNo);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $rows = array();
+    while ($row = mysqli_fetch_assoc($result)) {
+        $rows[] = $row;
+    }
+    mysqli_stmt_close($stmt);
+    return $rows;
 }

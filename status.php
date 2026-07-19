@@ -34,6 +34,18 @@ if (!$order) {
     respond(404, array('error' => '找不到訂單'));
 }
 
+$refunds = db_list_refunds($conn, $merTradeNo);
+$refundList = array();
+foreach ($refunds as $r) {
+    $refundList[] = array(
+        'closeType' => (int) $r['close_type'],
+        'amount' => (int) $r['amount'],
+        'status' => $r['status'],
+        'message' => $r['message'],
+        'createdAt' => $r['created_at'],
+    );
+}
+
 respond(200, array(
     'merTradeNo' => $order['mer_trade_no'],
     'status' => $order['status'],
@@ -44,4 +56,6 @@ respond(200, array(
     'message' => $order['message'],
     'createdAt' => $order['created_at'],
     'updatedAt' => $order['updated_at'],
+    'totalRefunded' => db_sum_refunded_amount($conn, $merTradeNo),
+    'refunds' => $refundList,
 ));

@@ -11,3 +11,5 @@ require_once __DIR__ . '/db.php';
 $conn = db_connect();
 db_create_orders_table_if_not_exists($conn);
 echo "orders 資料表已建立（或本來就存在）\n";
+db_create_refunds_table_if_not_exists($conn);
+echo "refunds 資料表已建立（或本來就存在）\n";

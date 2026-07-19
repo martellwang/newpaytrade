@@ -14,6 +14,11 @@ define('PAYUNI_HASH_IV', '');  // 16 碼
 // 正式環境：https://api.payuni.com.tw/api/credit
 define('PAYUNI_DIRECT_AUTH_URL', 'https://api.payuni.com.tw/api/credit');
 
+// 交易請退款 API 網址（CloseType 1=請款 2=退款 -1/-2=取消）
+// 測試環境：https://sandbox-api.payuni.com.tw/api/trade/close
+// 正式環境：https://api.payuni.com.tw/api/trade/close
+define('PAYUNI_REFUND_URL', 'https://api.payuni.com.tw/api/trade/close');
+
 // 這個服務對外的網址，用來組出 NotifyURL
 define('PUBLIC_BASE_URL', 'https://www.newpay.com.tw/newpaytrade');
 

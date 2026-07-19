@@ -1,5 +1,11 @@
 Options -Indexes
 
-<FilesMatch "^(config|payuni_crypto|db|setup_db)\.php$">
+# 只允許存取真正對外的 API 端點，其他一律擋掉。
+# 用白名單而不是黑名單：新增檔案時預設是安全的，不會因為忘記加規則而外洩。
+<FilesMatch ".*">
     Require all denied
+</FilesMatch>
+
+<FilesMatch "^(authorize-direct|refund|status|notify-direct)\.php$">
+    Require all granted
 </FilesMatch>
