@@ -42,6 +42,24 @@ if (!$order) {
       <tr><th>授權碼</th><td><?= h($order['auth_code'] ?: '—') ?></td></tr>
       <tr><th>卡號末四碼</th><td><?= h($order['card4_no'] ?: '—') ?></td></tr>
       <tr><th>訊息</th><td><?= h($order['message'] ?: '—') ?></td></tr>
+      <tr><th>刷卡機</th><td>
+        <?php
+        $dev = !empty($order['device_id']) ? db_find_device($conn, $order['device_id']) : null;
+        if ($dev) {
+            echo h(trim(($dev['terminal_uid'] ? $dev['terminal_uid'] . ' ' : '')
+                . ($dev['brand'] ?: '') . ' ' . ($dev['model'] ?: '')));
+            if ($dev['name']) echo ' <span class="muted">(' . h($dev['name']) . ')</span>';
+        } elseif (!empty($order['device_serial'])) {
+            // 裝置登記被刪掉了，但交易當下的序號快照還在
+            echo h($order['device_serial']) . ' <span class="muted">(此機器已無登記資料)</span>';
+        } else {
+            echo '—';
+        }
+        ?>
+        <?php if (!empty($order['device_serial'])): ?>
+          <div class="muted" style="font-size:12px">序號 <?= h($order['device_serial']) ?></div>
+        <?php endif; ?>
+      </td></tr>
       <tr><th>建立時間</th><td><?= h($order['created_at']) ?></td></tr>
       <tr><th>最後更新</th><td><?= h($order['updated_at']) ?></td></tr>
     </table>

@@ -20,17 +20,19 @@ if (in_array($status, array('success', 'failed', 'pending'), true)) {
     $where[] = 'status = ?'; $types .= 's'; $args[] = $status;
 }
 if ($keyword !== '') {
-    $where[] = '(mer_trade_no LIKE ? OR payuni_trade_no LIKE ? OR card4_no = ?)';
-    $types .= 'sss';
+    $where[] = '(mer_trade_no LIKE ? OR payuni_trade_no LIKE ? OR card4_no = ? OR device_id = ? OR device_serial = ?)';
+    $types .= 'sssss';
     $args[] = '%' . $keyword . '%';
     $args[] = '%' . $keyword . '%';
+    $args[] = $keyword;
+    $args[] = $keyword;
     $args[] = $keyword;
 }
 $whereSql = implode(' AND ', $where);
 
 $stmt = mysqli_prepare($conn,
     "SELECT o.created_at, o.mer_trade_no, o.amount, o.status, o.payuni_trade_no,
-            o.auth_code, o.card4_no, o.message,
+            o.auth_code, o.card4_no, o.message, o.device_serial,
             COALESCE((SELECT SUM(r.amount) FROM refunds r
                       WHERE r.mer_trade_no = o.mer_trade_no
                         AND r.close_type = 2 AND r.status='success'), 0) AS refunded
@@ -49,7 +51,7 @@ fwrite($out, "\xEF\xBB\xBF");
 
 fputcsv($out, array(
     '時間', '訂單編號', '金額', '狀態', 'PAYUNi交易序號',
-    '授權碼', '卡號末四碼', '已退款金額', '淨額', '訊息',
+    '授權碼', '卡號末四碼', '刷卡機序號', '已退款金額', '淨額', '訊息',
 ));
 
 $statusLabels = array('success' => '成功', 'failed' => '失敗', 'pending' => '處理中');
@@ -65,6 +67,7 @@ while ($r = mysqli_fetch_assoc($result)) {
         // 加上定位字元強制當文字處理。訂單編號同理但目前都有英文開頭。
         $r['auth_code'] !== null && $r['auth_code'] !== '' ? "\t" . $r['auth_code'] : '',
         $r['card4_no'] !== null && $r['card4_no'] !== '' ? "\t" . $r['card4_no'] : '',
+        $r['device_serial'],
         (int) $r['refunded'],
         $net,
         $r['message'],

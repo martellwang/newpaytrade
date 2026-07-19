@@ -65,6 +65,8 @@ if (!is_numeric($amount) || $amount <= 0) {
 // 是哪一台刷的。缺少也不擋交易 —— 收款比登記重要。
 $device = isset($input['device']) && is_array($input['device']) ? $input['device'] : null;
 $deviceId = ($device && !empty($device['deviceId'])) ? substr((string) $device['deviceId'], 0, 64) : null;
+// 機器的硬體序號（UID）。存進訂單當快照，之後裝置資料被改或刪也查得到。
+$deviceSerial = ($device && !empty($device['serialNo'])) ? substr((string) $device['serialNo'], 0, 64) : null;
 
 // 速率限制：一定要在送去 PAYUNi「之前」擋，被擋下的請求不會用掉商店額度、
 // 不會產生手續費，也不會被 PAYUNi 風控記為異常。
@@ -119,6 +121,7 @@ if ($conn) {
         try {
             db_upsert_device($conn, array(
                 'deviceId' => $deviceId,
+                'serialNo' => $deviceSerial,
                 'brand' => isset($device['brand']) ? $device['brand'] : null,
                 'manufacturer' => isset($device['manufacturer']) ? $device['manufacturer'] : null,
                 'model' => isset($device['model']) ? $device['model'] : null,
@@ -136,7 +139,7 @@ if ($conn) {
     }
 
     try {
-        db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId);
+        db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId, $deviceSerial);
     } catch (Exception $e) {
         error_log('寫入 pending 訂單失敗：' . $e->getMessage());
         // 資料庫寫入失敗不擋交易，continue，但要記 log 之後追查

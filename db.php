@@ -84,6 +84,9 @@ function db_create_devices_table_if_not_exists($conn) {
         CREATE TABLE IF NOT EXISTS devices (
             id INT AUTO_INCREMENT PRIMARY KEY,
             device_id VARCHAR(64) NOT NULL UNIQUE,
+            serial_no VARCHAR(64) NULL,
+            terminal_uid VARCHAR(64) NULL,
+            name VARCHAR(64) NULL,
             brand VARCHAR(64) NULL,
             manufacturer VARCHAR(64) NULL,
             model VARCHAR(64) NULL,
@@ -103,14 +106,91 @@ function db_create_devices_table_if_not_exists($conn) {
         throw new Exception('建立 devices 資料表失敗：' . mysqli_error($conn));
     }
 
-    // orders 加上 device_id，讓每筆交易可追溯到是哪台機器刷的。
-    // 用 SHOW COLUMNS 判斷再加，這樣重複執行 setup_db.php 不會出錯。
-    $res = mysqli_query($conn, "SHOW COLUMNS FROM orders LIKE 'device_id'");
-    if ($res && mysqli_num_rows($res) === 0) {
-        if (!mysqli_query($conn, "ALTER TABLE orders ADD COLUMN device_id VARCHAR(64) NULL, ADD INDEX idx_device (device_id)")) {
-            throw new Exception('orders 新增 device_id 欄位失敗：' . mysqli_error($conn));
+    // 舊版資料表可能沒有後來加的欄位，逐一補上（重複執行不會出錯）
+    $deviceCols = array(
+        'serial_no' => "ALTER TABLE devices ADD COLUMN serial_no VARCHAR(64) NULL",
+        'terminal_uid' => "ALTER TABLE devices ADD COLUMN terminal_uid VARCHAR(64) NULL",
+        'name' => "ALTER TABLE devices ADD COLUMN name VARCHAR(64) NULL",
+    );
+    foreach ($deviceCols as $col => $ddl) {
+        $res = mysqli_query($conn, "SHOW COLUMNS FROM devices LIKE '$col'");
+        if ($res && mysqli_num_rows($res) === 0) {
+            mysqli_query($conn, $ddl);
         }
     }
+
+    // orders 加上 device_id 與 device_serial。
+    // device_serial 存的是「交易當下」的機器序號快照 —— 就算之後裝置資料
+    // 被修改或刪除，歷史交易仍查得到當時是哪台機器刷的。
+    $orderCols = array(
+        'device_id' => "ALTER TABLE orders ADD COLUMN device_id VARCHAR(64) NULL, ADD INDEX idx_device (device_id)",
+        'device_serial' => "ALTER TABLE orders ADD COLUMN device_serial VARCHAR(64) NULL",
+    );
+    foreach ($orderCols as $col => $ddl) {
+        $res = mysqli_query($conn, "SHOW COLUMNS FROM orders LIKE '$col'");
+        if ($res && mysqli_num_rows($res) === 0) {
+            if (!mysqli_query($conn, $ddl)) {
+                throw new Exception("orders 新增 $col 欄位失敗：" . mysqli_error($conn));
+            }
+        }
+    }
+}
+
+/** 手動登記一台機器（用於裝不了 App 的機器，例如 Ingenico APOS A8）*/
+function db_manual_add_device($conn, $d) {
+    $stmt = mysqli_prepare(
+        $conn,
+        'INSERT INTO devices
+            (device_id, serial_no, terminal_uid, name, brand, manufacturer, model,
+             android_version, has_nfc, note)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON DUPLICATE KEY UPDATE
+            serial_no=VALUES(serial_no), terminal_uid=VALUES(terminal_uid),
+            name=VALUES(name), brand=VALUES(brand), manufacturer=VALUES(manufacturer),
+            model=VALUES(model), android_version=VALUES(android_version),
+            has_nfc=VALUES(has_nfc), note=VALUES(note)'
+    );
+    $hasNfc = ($d['hasNfc'] === '' || $d['hasNfc'] === null) ? null : (int) $d['hasNfc'];
+    mysqli_stmt_bind_param(
+        $stmt, 'ssssssssis',
+        $d['deviceId'], $d['serialNo'], $d['terminalUid'], $d['name'], $d['brand'],
+        $d['manufacturer'], $d['model'], $d['androidVersion'], $hasNfc, $d['note']
+    );
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('手動登記裝置失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 更新可由管理者自訂的欄位（機台編號、名稱、備註）*/
+function db_update_device_meta($conn, $deviceId, $terminalUid, $name, $note) {
+    $stmt = mysqli_prepare(
+        $conn,
+        'UPDATE devices SET terminal_uid = ?, name = ?, note = ? WHERE device_id = ?'
+    );
+    mysqli_stmt_bind_param($stmt, 'ssss', $terminalUid, $name, $note, $deviceId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('更新裝置資料失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 刪除一台裝置的登記（歷史交易的 device_serial 快照不受影響）*/
+function db_delete_device($conn, $deviceId) {
+    $stmt = mysqli_prepare($conn, 'DELETE FROM devices WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 's', $deviceId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/** 取單一裝置 */
+function db_find_device($conn, $deviceId) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM devices WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 's', $deviceId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
 }
 
 /**
@@ -118,13 +198,16 @@ function db_create_devices_table_if_not_exists($conn) {
  * 可以看出哪些機器還在用、哪些已經沒在用了。
  */
 function db_upsert_device($conn, $d) {
+    // 注意：terminal_uid / name / note 是管理者自己填的，這裡「不」覆蓋，
+    // 否則每次交易都會把人工設定的機台編號洗掉。
     $stmt = mysqli_prepare(
         $conn,
         'INSERT INTO devices
-            (device_id, brand, manufacturer, model, product, android_version, android_sdk,
-             app_version, has_nfc, nfc_enabled, screen)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            (device_id, serial_no, brand, manufacturer, model, product, android_version,
+             android_sdk, app_version, has_nfc, nfc_enabled, screen)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
          ON DUPLICATE KEY UPDATE
+            serial_no=VALUES(serial_no),
             brand=VALUES(brand), manufacturer=VALUES(manufacturer), model=VALUES(model),
             product=VALUES(product), android_version=VALUES(android_version),
             android_sdk=VALUES(android_sdk), app_version=VALUES(app_version),
@@ -136,11 +219,11 @@ function db_upsert_device($conn, $d) {
     $nfcOn = isset($d['nfcEnabled']) ? (int) (bool) $d['nfcEnabled'] : null;
     // 型別字串要跟參數順序一一對應，錯位不會報錯但會靜默轉型
     // （曾把 appVersion 標成 i，"0.1-dev" 就被轉成 0）。
-    //        deviceId brand manufacturer model product androidVersion sdk appVersion hasNfc nfcOn screen
-    //        s        s     s            s     s       s              i   s          i      i     s
+    //   deviceId serialNo brand manufacturer model product androidVersion sdk appVersion hasNfc nfcOn screen
+    //   s        s        s     s            s     s       s              i   s          i      i     s
     mysqli_stmt_bind_param(
-        $stmt, 'ssssssisiis',
-        $d['deviceId'], $d['brand'], $d['manufacturer'], $d['model'], $d['product'],
+        $stmt, 'sssssssisiis',
+        $d['deviceId'], $d['serialNo'], $d['brand'], $d['manufacturer'], $d['model'], $d['product'],
         $d['androidVersion'], $sdk, $d['appVersion'], $hasNfc, $nfcOn, $d['screen']
     );
     if (!mysqli_stmt_execute($stmt)) {
@@ -163,10 +246,10 @@ function db_list_devices($conn) {
 }
 
 /** 交易送出前先寫一筆 pending 紀錄，拿到 PAYUNi 回應後再更新 */
-function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null) {
-    $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status, device_id) VALUES (?, ?, ?, ?)');
+function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null) {
+    $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial) VALUES (?, ?, ?, ?, ?)');
     $status = 'pending';
-    mysqli_stmt_bind_param($stmt, 'siss', $merTradeNo, $amount, $status, $deviceId);
+    mysqli_stmt_bind_param($stmt, 'sisss', $merTradeNo, $amount, $status, $deviceId, $deviceSerial);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('寫入訂單紀錄失敗：' . mysqli_stmt_error($stmt));
     }

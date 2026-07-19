@@ -30,12 +30,14 @@ if (in_array($status, array('success', 'failed', 'pending'), true)) {
     $args[] = $status;
 }
 if ($keyword !== '') {
-    // 訂單編號、PAYUNi 交易序號、卡號末四碼都可以查
-    $where[] = '(mer_trade_no LIKE ? OR payuni_trade_no LIKE ? OR card4_no = ?)';
-    $types .= 'sss';
+    // 訂單編號、PAYUNi 交易序號、卡號末四碼、刷卡機識別碼／序號都可以查
+    $where[] = '(mer_trade_no LIKE ? OR payuni_trade_no LIKE ? OR card4_no = ? OR device_id = ? OR device_serial = ?)';
+    $types .= 'sssss';
     $like = '%' . $keyword . '%';
     $args[] = $like;
     $args[] = $like;
+    $args[] = $keyword;
+    $args[] = $keyword;
     $args[] = $keyword;
 }
 $whereSql = implode(' AND ', $where);
