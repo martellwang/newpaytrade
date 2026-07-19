@@ -12,8 +12,7 @@ function respond($statusCode, $body) {
     exit;
 }
 
-$headers = getallheaders();
-$apiKey = isset($headers['X-API-Key']) ? $headers['X-API-Key'] : '';
+$apiKey = isset($_SERVER['HTTP_X_API_KEY']) ? $_SERVER['HTTP_X_API_KEY'] : '';
 if ($apiKey === '' || $apiKey !== BACKEND_API_KEY) {
     respond(401, array('status' => 'failed', 'message' => 'unauthorized'));
 }

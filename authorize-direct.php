@@ -19,9 +19,11 @@ function respond($statusCode, $body) {
 }
 
 // 驗證 App 呼叫時帶的 X-API-Key，防止外部直接呼叫這支會把卡號送去
-// PAYUNi 授權的 API。
-$headers = getallheaders();
-$apiKey = isset($headers['X-API-Key']) ? $headers['X-API-Key'] : '';
+// PAYUNi 授權的 API。用 $_SERVER['HTTP_X_API_KEY'] 讀取，不要用
+// getallheaders()['X-API-Key']——getallheaders() 回傳的 key 大小寫
+// 正規化方式不保證跟原始 header 名稱一致（實測會變成 'X-Api-Key'），
+// 用陣列 key 直接比對容易讀不到值。
+$apiKey = isset($_SERVER['HTTP_X_API_KEY']) ? $_SERVER['HTTP_X_API_KEY'] : '';
 if ($apiKey === '' || $apiKey !== BACKEND_API_KEY) {
     respond(401, array('status' => 'failed', 'message' => 'unauthorized'));
 }
