@@ -28,6 +28,7 @@ php -f setup_db.php   # 建立 orders 資料表
 |---|---|---|
 | `authorize-direct.php` | POST | 信用卡幕後授權，需帶 `X-API-Key` header |
 | `refund.php` | POST | 交易請退款，需帶 `X-API-Key` header |
+| `query.php?merTradeNo=xxx` | GET/POST | 向 PAYUNi 查詢交易真實結果並補正本地狀態 |
 | `status.php?merTradeNo=xxx` | GET | 查詢訂單狀態與退款明細，需帶 `X-API-Key` |
 | `notify-direct.php` | POST | PAYUNi 背景通知接收（逾時情境的補救機制） |
 
@@ -89,7 +90,35 @@ php -f setup_db.php   # 建立 orders 資料表
 - **退款期限：請款完成後 180 天內**
 
 `pending` 代表 60 秒內沒收到銀行回應，**不可當作失敗**，要等背景通知或
-稍後查詢。
+用 `query.php` 查詢。
+
+### query.php
+
+用 `?merTradeNo=xxx` 或 `?tradeNo=xxx`（PAYUNi 的 UNi 序號）擇一查詢。
+
+主要用途是處理 `pending`：授權逾時後我們並不知道銀行到底有沒有扣款，
+這支去 PAYUNi 問出真實結果，並**自動補正本地訂單狀態**（只在本地狀態與
+查詢結果不一致時才更新）。
+
+```json
+{
+  "status": "success",
+  "merTradeNo": "...", "payuniTradeNo": "...",
+  "tradeStatus": "1", "tradeStatusText": "已付款",
+  "localStatus": "success", "localStatusUpdated": true,
+  "dataSource": "A", "dataComplete": true,
+  "authCode": "...", "card4No": "1234",
+  "closeStatus": "2", "closeAmt": "100",
+  "refundStatus": null, "refundAmt": null, "remainAmt": "100"
+}
+```
+
+- `tradeStatus`：`0`=取號成功 `9`=未付款 `1`=已付款 `2`=付款失敗
+  `3`=付款取消 `4`=交易逾期 `8`=訂單待確認
+- `dataComplete: false`（`DataSource=B`）代表 PAYUNi 端還在處理、資料不
+  完整，**這時不會拿來補正本地狀態**，官方建議 10 分鐘後再查一次
+- `remainAmt` 是 PAYUNi 端的剩餘可退款金額，**比本地累加的數字權威**，
+  退款前建議以這個為準
 
 ## 實作要點
 
@@ -106,8 +135,11 @@ php -f setup_db.php   # 建立 orders 資料表
   - 退款（`/api/trade/close`）沒帶的話會收到 `DEF01007 Hash比對不符合`。
     **這個錯誤訊息會誤導人去查簽章公式**，實際上公式是對的，是平台端用
     錯的金鑰情境驗證。
-- **各支 API 的 `Version` 不一樣**：幕後授權是 `1.3`，交易請退款是 `1.0`。
-  照抄會出錯。
+- **各支 API 的 `Version` 都不一樣**：幕後授權 `1.3`、交易請退款 `1.0`、
+  交易查詢 `2.0`。照抄會出錯。
+- **交易查詢的結果包在 `Result` 陣列裡**，不是放在解密後的最外層（因為
+  同一個端點也支援多筆查詢）。單筆查詢要取 `Result[0]`，直接讀最外層會
+  拿到一片空值而且不會報錯。
 - **幕後授權有 IP 白名單**，要在 PAYUNi 後台把伺服器對外 IP 加進去，
   否則收到 `CREDIT03010 不提供此IP幕後交易，<IP>`。換伺服器記得更新。
 - **回應要看兩層**：最外層 `Status` 是請求層級結果（簽章、格式、IP 等），

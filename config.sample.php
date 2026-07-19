@@ -19,6 +19,11 @@ define('PAYUNI_DIRECT_AUTH_URL', 'https://api.payuni.com.tw/api/credit');
 // 正式環境：https://api.payuni.com.tw/api/trade/close
 define('PAYUNI_REFUND_URL', 'https://api.payuni.com.tw/api/trade/close');
 
+// 交易查詢 API 網址（用來查逾時 pending 交易的真實結果）
+// 測試環境：https://sandbox-api.payuni.com.tw/api/trade/query
+// 正式環境：https://api.payuni.com.tw/api/trade/query
+define('PAYUNI_QUERY_URL', 'https://api.payuni.com.tw/api/trade/query');
+
 // 這個服務對外的網址，用來組出 NotifyURL
 define('PUBLIC_BASE_URL', 'https://www.newpay.com.tw/newpaytrade');
 

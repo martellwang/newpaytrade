@@ -7,6 +7,6 @@ Options -Indexes
     Require all denied
 </FilesMatch>
 
-<FilesMatch "^(authorize-direct|refund|status|notify-direct)\.php$">
+<FilesMatch "^(authorize-direct|refund|query|status|notify-direct)\.php$">
     Require all granted
 </FilesMatch>
