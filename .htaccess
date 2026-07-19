@@ -1,0 +1,5 @@
+Options -Indexes
+
+<FilesMatch "^(config|payuni_crypto|db|setup_db)\.php$">
+    Require all denied
+</FilesMatch>
