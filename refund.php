@@ -25,6 +25,7 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/payuni_crypto.php';
 require_once __DIR__ . '/payuni_error_codes.php';
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/rate_limit.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -68,6 +69,14 @@ try {
     error_log('退款：資料庫連線失敗：' . $e->getMessage());
     respond(500, array('status' => 'failed', 'message' => '系統錯誤，請稍後再試'));
 }
+
+// 速率限制：退款沒有卡號可比對，只依 IP。這裡跟授權不同——退款一定要有
+// 資料庫才能做（要查訂單），所以 DB 正常時就一定會檢查。
+$rateLimitMessage = rl_check($conn);
+if ($rateLimitMessage !== null) {
+    respond(429, array('status' => 'failed', 'message' => $rateLimitMessage));
+}
+rl_record_attempt($conn);
 
 $order = db_find_order($conn, $merTradeNo);
 if (!$order) {

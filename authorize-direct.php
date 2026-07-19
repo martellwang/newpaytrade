@@ -10,6 +10,7 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/payuni_crypto.php';
 require_once __DIR__ . '/payuni_error_codes.php';
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/rate_limit.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -60,6 +61,24 @@ if (!is_numeric($amount) || $amount <= 0) {
     respond(400, array('status' => 'failed', 'message' => 'amount 必須是大於 0 的數字'));
 }
 
+// 速率限制：一定要在送去 PAYUNi「之前」擋，被擋下的請求不會用掉商店額度、
+// 不會產生手續費，也不會被 PAYUNi 風控記為異常。
+// 資料庫連線在這裡就先開，後面寫訂單紀錄會重複使用。
+$conn = null;
+try {
+    $conn = db_connect();
+    $rateLimitMessage = rl_check($conn, $cardNumber);
+    if ($rateLimitMessage !== null) {
+        respond(429, array('status' => 'failed', 'message' => $rateLimitMessage));
+    }
+    rl_record_attempt($conn, $cardNumber);
+    rl_cleanup_occasionally($conn);
+} catch (Exception $e) {
+    // 資料庫掛掉時不擋交易（避免收銀完全無法運作），但要記 log。
+    // 這是可用性與安全性的取捨：DB 故障是短暫的，硬擋會讓門市無法收款。
+    error_log('速率限制檢查失敗（放行）：' . $e->getMessage());
+}
+
 // CardExpired 格式為 MMYY（月在前、年在後，兩碼年份）
 $cardExpired = str_pad($expiryMonth, 2, '0', STR_PAD_LEFT) . substr((string) $expiryYear, -2);
 
@@ -88,13 +107,14 @@ try {
 }
 
 // 交易送出前先記一筆 pending，就算後面連線逾時也有紀錄可查
-$conn = null;
-try {
-    $conn = db_connect();
-    db_insert_pending_order($conn, $merTradeNo, round($amount));
-} catch (Exception $e) {
-    error_log('寫入 pending 訂單失敗：' . $e->getMessage());
-    // 資料庫寫入失敗不擋交易，continue，但要記 log 之後追查
+// （$conn 在前面做速率限制時已經開好了，沒開成功就是 null）
+if ($conn) {
+    try {
+        db_insert_pending_order($conn, $merTradeNo, round($amount));
+    } catch (Exception $e) {
+        error_log('寫入 pending 訂單失敗：' . $e->getMessage());
+        // 資料庫寫入失敗不擋交易，continue，但要記 log 之後追查
+    }
 }
 
 $postFields = http_build_query(array(
@@ -175,6 +195,8 @@ if (!isset($result['Status']) || $result['Status'] !== 'SUCCESS') {
     if ($conn) {
         try {
             db_update_order_result($conn, $merTradeNo, 'failed', null, null, $failCard4No, $message, $responseBody);
+            // 累積失敗次數：測卡的失敗率極高，這是最有效的偵測特徵
+            rl_record_failure($conn, $cardNumber);
         } catch (Exception $e) {
             error_log('更新失敗訂單狀態失敗：' . $e->getMessage());
         }
@@ -237,6 +259,7 @@ $message = !empty($detail['ResCodeMsg'])
 if ($conn) {
     try {
         db_update_order_result($conn, $merTradeNo, 'failed', null, null, null, $message, $responseBody);
+        rl_record_failure($conn, $cardNumber);
     } catch (Exception $e) {
         error_log('更新失敗訂單狀態失敗：' . $e->getMessage());
     }
