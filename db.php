@@ -198,6 +198,36 @@ function db_find_device($conn, $deviceId) {
  * 可以看出哪些機器還在用、哪些已經沒在用了。
  */
 function db_upsert_device($conn, $d) {
+    // 同一台機器可能已經用「硬體序號」手動登記過（App 裝不上去時我們會先
+    // 手動建檔），而 App 自動登記用的是 ANDROID_ID —— 識別碼不同會變成
+    // 兩筆重複紀錄。所以先用序號找找看有沒有既有紀錄，有的話就沿用它的
+    // device_id 更新，不要另外新增一筆。
+    if (!empty($d['serialNo'])) {
+        $stmt = mysqli_prepare(
+            $conn,
+            'SELECT device_id FROM devices WHERE serial_no = ? AND device_id <> ? LIMIT 1'
+        );
+        mysqli_stmt_bind_param($stmt, 'ss', $d['serialNo'], $d['deviceId']);
+        mysqli_stmt_execute($stmt);
+        $existing = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+        mysqli_stmt_close($stmt);
+
+        if ($existing) {
+            // 沿用既有那筆（保住人工設定的機台編號與備註），但把 device_id
+            // 換成 App 回報的 ANDROID_ID，之後交易才對得起來。
+            $stmt = mysqli_prepare($conn, 'UPDATE devices SET device_id = ? WHERE device_id = ?');
+            mysqli_stmt_bind_param($stmt, 'ss', $d['deviceId'], $existing['device_id']);
+            mysqli_stmt_execute($stmt);
+            mysqli_stmt_close($stmt);
+
+            // 舊 device_id 關聯的歷史交易也一併指向新的，避免斷鏈
+            $stmt = mysqli_prepare($conn, 'UPDATE orders SET device_id = ? WHERE device_id = ?');
+            mysqli_stmt_bind_param($stmt, 'ss', $d['deviceId'], $existing['device_id']);
+            mysqli_stmt_execute($stmt);
+            mysqli_stmt_close($stmt);
+        }
+    }
+
     // 注意：terminal_uid / name / note 是管理者自己填的，這裡「不」覆蓋，
     // 否則每次交易都會把人工設定的機台編號洗掉。
     $stmt = mysqli_prepare(
