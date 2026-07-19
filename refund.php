@@ -23,6 +23,7 @@
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/payuni_crypto.php';
+require_once __DIR__ . '/payuni_error_codes.php';
 require_once __DIR__ . '/db.php';
 
 header('Content-Type: application/json; charset=utf-8');
@@ -200,7 +201,12 @@ if (!isset($result['Status']) || $result['Status'] !== 'SUCCESS') {
         }
     }
 
-    $message = $decryptedMessage ?: (isset($result['Message']) ? $result['Message'] : '退款請求失敗');
+    $message = payuni_resolve_error_message(
+        isset($result['Status']) ? $result['Status'] : '',
+        $decryptedMessage,
+        isset($result['Message']) ? $result['Message'] : null,
+        '退款請求失敗'
+    );
     if ($refundId) {
         try {
             db_update_refund_result($conn, $refundId, 'failed', $message, $responseBody);

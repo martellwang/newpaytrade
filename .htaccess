@@ -1,6 +1,7 @@
 Options -Indexes
 
-# 只允許存取真正對外的 API 端點，其他一律擋掉。
+# 只允許存取真正對外的 API 端點，其他一律擋掉（config.php、含密鑰的編輯器
+# 備份檔 config.php~ / .bak 等都會被擋）。
 # 用白名單而不是黑名單：新增檔案時預設是安全的，不會因為忘記加規則而外洩。
 <FilesMatch ".*">
     Require all denied

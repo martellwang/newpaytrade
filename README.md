@@ -115,7 +115,13 @@ php -f setup_db.php   # 建立 orders 資料表
   （`1`=已付款 / `2`=付款失敗 / `3`=付款取消 / `8`=訂單暫緩確認），
   兩者都要檢查。
 - **錯誤訊息在加密內容裡**：外層的 `Message` 常常是空的，實際失敗原因要
-  解密 `EncryptInfo` 才看得到。
+  解密 `EncryptInfo` 才看得到。但有些情境（例如 `DEF01007`）連
+  `EncryptInfo` 都解不開，只剩下代碼——所以 `payuni_error_codes.php`
+  收錄了官方文件的完整錯誤代碼對照表當退路，訊息解析優先序為：
+  解密後的 `Message` → 外層 `Message` → 對照表 → 原始代碼。
+- **授權失敗時看 `ResCodeMsg` 而不是 `Message`**：`Message` 只會給籠統的
+  「授權失敗」，`ResCodeMsg` 才有銀行給的具體原因（例如
+  「授權失敗_無此發卡行(No such issuer)」）。
 - **X-API-Key 用 `$_SERVER['HTTP_X_API_KEY']` 讀取**，不要用
   `getallheaders()['X-API-Key']`——回傳的 key 大小寫正規化方式不保證跟
   原始 header 名稱一致（Apache 上實測會變成 `X-Api-Key`）。

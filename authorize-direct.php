@@ -8,6 +8,7 @@
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/payuni_crypto.php';
+require_once __DIR__ . '/payuni_error_codes.php';
 require_once __DIR__ . '/db.php';
 
 header('Content-Type: application/json; charset=utf-8');
@@ -157,7 +158,12 @@ if (!isset($result['Status']) || $result['Status'] !== 'SUCCESS') {
         }
     }
 
-    $message = $decryptedMessage ?: (isset($result['Message']) ? $result['Message'] : '請求失敗');
+    $message = payuni_resolve_error_message(
+        isset($result['Status']) ? $result['Status'] : '',
+        $decryptedMessage,
+        isset($result['Message']) ? $result['Message'] : null,
+        '請求失敗'
+    );
     if ($conn) {
         try {
             db_update_order_result($conn, $merTradeNo, 'failed', null, null, null, $message, $responseBody);
@@ -210,7 +216,16 @@ if (isset($detail['Status']) && $detail['Status'] === 'SUCCESS' && isset($detail
     ));
 }
 
-$message = isset($detail['Message']) ? $detail['Message'] : (isset($detail['ResCodeMsg']) ? $detail['ResCodeMsg'] : '交易未通過');
+// ResCodeMsg 是銀行回的具體原因（例如「授權失敗_無此發卡行(No such issuer)」），
+// 比籠統的 Message（「授權失敗」）有用，優先採用。
+$message = !empty($detail['ResCodeMsg'])
+    ? $detail['ResCodeMsg']
+    : payuni_resolve_error_message(
+        isset($detail['Status']) ? $detail['Status'] : '',
+        isset($detail['Message']) ? $detail['Message'] : null,
+        null,
+        '交易未通過'
+    );
 if ($conn) {
     try {
         db_update_order_result($conn, $merTradeNo, 'failed', null, null, null, $message, $responseBody);
