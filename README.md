@@ -35,6 +35,30 @@ php -f setup_db.php   # 建立 orders 資料表
 `authorize-direct.php` 與 `refund.php` 受速率限制保護，超過門檻回
 HTTP `429`（見下方「速率限制」）。
 
+## 管理介面
+
+`admin/`，給人看的網頁介面（跟給機器用的 API 分開）：
+
+| 頁面 | 說明 |
+|---|---|
+| `admin/index.php` | 交易紀錄查詢：日期區間、狀態、訂單編號／交易序號／卡號末四碼 |
+| `admin/report.php` | 對帳報表：區間總計 + 逐日明細（成功／退款／淨額） |
+| `admin/detail.php` | 單筆明細，含退款紀錄 |
+| `admin/export.php` | 匯出 CSV（含 UTF-8 BOM，Excel 開啟不亂碼） |
+
+**認證**：獨立的密碼登入（session），不是沿用 `X-API-Key`——那把金鑰是給
+App 用的機器憑證，放進網頁表單等於公開。設定方式見 `config.sample.php`
+的 `ADMIN_PASSWORD_HASH`。
+
+安全措施：密碼以 `password_hash` 儲存、session cookie 設
+`httponly`/`secure`/`samesite=Strict`、登入成功後 `session_regenerate_id`
+防 session fixation、表單有 CSRF token、30 分鐘閒置自動登出、登入失敗
+15 分鐘內 5 次就鎖（沿用既有的速率限制機制）。
+
+**對帳邏輯**：退款以「退款實際發生日」歸屬，而非原訂單日期——PAYUNi 的
+撥款也是這樣結算，兩邊才對得起來。報表會特別標示 `pending` 交易，那是
+對帳差異最常見的來源（狀態未定，可能已扣款），要先用 `query.php` 補正。
+
 ### authorize-direct.php
 
 請求（`Content-Type: application/json`）：

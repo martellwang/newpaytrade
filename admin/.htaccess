@@ -1,0 +1,12 @@
+# 這層的規則會覆蓋上層 newpaytrade/.htaccess 的白名單。
+# 一樣採白名單制：只放行真正要給人開的頁面，auth.php / layout.php 這種
+# 只被 include 的檔案不對外開放。
+Options -Indexes
+
+<FilesMatch ".*">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "^(login|logout|index|report|detail|export)\.php$">
+    Require all granted
+</FilesMatch>

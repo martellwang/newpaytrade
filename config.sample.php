@@ -35,3 +35,17 @@ define('DB_HOST', 'localhost');
 define('DB_NAME', '');
 define('DB_USER', '');
 define('DB_PASS', '');
+
+// 管理介面登入密碼（只存雜湊，不存明碼）。產生方式（在主機上執行）：
+//   php -r 'echo password_hash("你的密碼", PASSWORD_DEFAULT), PHP_EOL;'
+// 把輸出的整串填在下面，**要用單引號包起來**。
+//
+// ⚠️ bcrypt 雜湊長得像 $2y$10$xxxx，裡面的 $ 很容易被工具吃掉：
+//    - 用雙引號包（PHP 會把 $2y 當變數）→ 前綴消失
+//    - 用 sed/perl 取代寫入（$2、$10 被當回溯參照）→ 前綴消失
+//    正確做法：手動用編輯器貼上並用單引號包，貼完務必驗證：
+//      php -r 'require "config.php"; var_dump(strlen(ADMIN_PASSWORD_HASH) === 60);'
+//    長度必須是 60，且開頭是 $2y$ 才正確。
+//
+// 留空則管理介面無法登入。
+define('ADMIN_PASSWORD_HASH', '');
