@@ -148,10 +148,18 @@ if (!isset($result['Status']) || $result['Status'] !== 'SUCCESS') {
     error_log('PAYUNi 回應非 SUCCESS，完整內容：' . $responseBody);
 
     $decryptedMessage = null;
+    $failCard4No = null;
     if (!empty($result['EncryptInfo'])) {
         try {
             $failDetail = payuni_decrypt_trade_info($result['EncryptInfo'], PAYUNI_HASH_KEY, PAYUNI_HASH_IV);
-            $decryptedMessage = isset($failDetail['Message']) ? $failDetail['Message'] : null;
+            // ResCodeMsg 是銀行給的具體原因（例如「授權失敗_無此發卡行
+            // (No such issuer)」），比籠統的 Message（「授權失敗」）有用，
+            // 授權被拒時大多走這條分支，所以這裡也要優先取 ResCodeMsg。
+            $decryptedMessage = !empty($failDetail['ResCodeMsg'])
+                ? $failDetail['ResCodeMsg']
+                : (isset($failDetail['Message']) ? $failDetail['Message'] : null);
+            // 失敗時 PAYUNi 也會回卡號後四碼，存下來方便對帳查問題
+            $failCard4No = !empty($failDetail['Card4No']) ? $failDetail['Card4No'] : null;
             error_log('解密內容：' . json_encode($failDetail, JSON_UNESCAPED_UNICODE));
         } catch (Exception $e) {
             // EncryptInfo 可能是空的或格式不同，解密失敗就略過，不影響主要回應
@@ -166,7 +174,7 @@ if (!isset($result['Status']) || $result['Status'] !== 'SUCCESS') {
     );
     if ($conn) {
         try {
-            db_update_order_result($conn, $merTradeNo, 'failed', null, null, null, $message, $responseBody);
+            db_update_order_result($conn, $merTradeNo, 'failed', null, null, $failCard4No, $message, $responseBody);
         } catch (Exception $e) {
             error_log('更新失敗訂單狀態失敗：' . $e->getMessage());
         }
