@@ -1,5 +1,8 @@
 Options -Indexes
 
+# tests/ 只在本機執行，不對外開放（白名單規則已經涵蓋，這裡再明確擋一次）
+RedirectMatch 403 ^/newpaytrade/tests/
+
 # 只允許存取真正對外的 API 端點，其他一律擋掉（config.php、含密鑰的編輯器
 # 備份檔 config.php~ / .bak 等都會被擋）。
 # 用白名單而不是黑名單：新增檔案時預設是安全的，不會因為忘記加規則而外洩。

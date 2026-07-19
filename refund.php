@@ -181,7 +181,7 @@ curl_close($ch);
 
 if ($responseBody === false) {
     $msg = ($curlErrno === CURLE_OPERATION_TIMEDOUT) ? '退款請求逾時，請稍後查詢確認結果' : '金流服務暫時無法回應';
-    error_log("退款呼叫失敗（$merTradeNo）：" . $curlError);
+    error_log("退款呼叫失敗（{$merTradeNo}）：" . $curlError);
     if ($refundId) {
         try {
             db_update_refund_result($conn, $refundId, 'pending', $msg, null);

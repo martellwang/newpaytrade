@@ -173,7 +173,7 @@ if ($authoritative && $localMerTradeNo !== '') {
                 $responseBody
             );
             $updated = true;
-            error_log("交易查詢補正訂單 $localMerTradeNo：{$order['status']} -> $localStatus");
+            error_log("交易查詢補正訂單 {$localMerTradeNo}：{$order['status']} -> $localStatus");
         }
     } catch (Exception $e) {
         error_log('交易查詢更新本地訂單失敗：' . $e->getMessage());
