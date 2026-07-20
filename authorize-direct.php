@@ -49,6 +49,60 @@ $expiryYear = isset($input['expiryYear']) ? $input['expiryYear'] : '';
 $cvv = isset($input['cvv']) ? $input['cvv'] : '';
 
 /*
+ * ── 收銀機登入身分 ────────────────────────────────────────────────
+ *
+ * 收銀機必須先登入某個客戶（見 pos_login.php），交易時帶著 token。
+ * 用哪個商店代號送出**由後端依 token 決定**，不是由 App 指定 ——
+ * 讓 App 自己帶 MerID 等於任何拿到 API Key 的人都能冒用別家商店收款。
+ *
+ * 相容處理：token 留空時退回 config.php 的 PAYUNI_MER_ID。這是為了讓
+ * 既有的收銀機在更新 App 之前還能繼續收款；等所有機器都換上登入流程
+ * 之後，這段可以移除並改成強制要求 token。
+ */
+$posToken = isset($_SERVER['HTTP_X_POS_TOKEN']) ? $_SERVER['HTTP_X_POS_TOKEN'] : '';
+$session = null;
+$merchantId = null;
+$storeId = null;
+$dealerId = null;
+$merIdForTrade = defined('PAYUNI_MER_ID') ? PAYUNI_MER_ID : '';
+
+if ($posToken !== '') {
+    try {
+        $conn0 = db_connect();
+        db_create_merchants_table_if_not_exists($conn0);
+        $session = db_find_session_by_token($conn0, $posToken);
+    } catch (Exception $e) {
+        error_log('查詢收銀機登入身分失敗：' . $e->getMessage());
+    }
+    if (!$session) {
+        // token 無效、客戶或商店已停用 —— 要明確擋下，不能默默退回預設
+        // 商店代號，那會讓已停用的客戶還能繼續收款
+        respond(401, array(
+            'status' => 'failed',
+            'message' => '收銀機登入已失效，請重新登入',
+            'needLogin' => true,
+        ));
+    }
+    if (empty($session['store_id']) || empty($session['mer_id'])) {
+        // 登入了但還沒選分店。這種 token 不能拿來交易 —— 沒有商店代號
+        // 就不知道這筆錢要進哪家店。
+        respond(400, array(
+            'status' => 'failed',
+            'message' => '尚未選擇商店，請重新登入並選擇',
+            'needStoreSelection' => true,
+        ));
+    }
+    $merchantId = (int) $session['merchant_id'];
+    $storeId = (int) $session['store_id'];
+    $dealerId = $session['dealer_id'] !== null ? (int) $session['dealer_id'] : null;
+    $merIdForTrade = $session['mer_id'];
+}
+
+if ($merIdForTrade === '') {
+    respond(500, array('status' => 'failed', 'message' => '系統尚未設定商店代號'));
+}
+
+/*
  * 分期期數（PAYUNi 的 CardInst，放在 EncryptInfo 內）。
  *   1  = 一次付清（PAYUNi 的預設值）
  *   3 / 6 / 9 / 12 / 18 / 24 / 30 = 分期
@@ -113,7 +167,8 @@ try {
 $cardExpired = str_pad($expiryMonth, 2, '0', STR_PAD_LEFT) . substr((string) $expiryYear, -2);
 
 $encryptInfoParams = array(
-    'MerID' => PAYUNI_MER_ID,
+    // 用登入客戶的商店代號，不是 config 裡的固定值
+    'MerID' => $merIdForTrade,
     'MerTradeNo' => $merTradeNo,
     'TradeAmt' => (string) round($amount),
     'Timestamp' => (string) time(),
@@ -202,7 +257,8 @@ if ($conn) {
     }
 
     try {
-        db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId, $deviceSerial, $cardInst);
+        db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId, $deviceSerial,
+            $cardInst, $merchantId, $merIdForTrade, $storeId, $dealerId);
     } catch (Exception $e) {
         error_log('寫入 pending 訂單失敗：' . $e->getMessage());
         // 資料庫寫入失敗不擋交易，continue，但要記 log 之後追查
@@ -210,7 +266,7 @@ if ($conn) {
 }
 
 $postFields = http_build_query(array(
-    'MerID' => PAYUNI_MER_ID,
+    'MerID' => $merIdForTrade,
     'Version' => '1.3',
     'EncryptInfo' => $encryptInfo,
     'HashInfo' => $hashInfo,
