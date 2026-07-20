@@ -1113,6 +1113,112 @@ function db_update_order_result($conn, $merTradeNo, $status, $payuniTradeNo, $au
     mysqli_stmt_close($stmt);
 }
 
+/**
+ * 收銀機的交易紀錄查詢。
+ *
+ * **一定要同時用 store_id 過濾**，不能只靠 device_id ——
+ * 收銀機可以換綁到別家商店（登出再用另一組帳號登入），只比對裝置的話，
+ * 新的店員就會看到前一家商店的交易金額。
+ *
+ * @param string|null $deviceId null = 查整家商店（給店長看的），
+ *                              有值 = 只查這台機器（店員對帳用）
+ * @param string|null $date     YYYY-MM-DD，null = 不限日期
+ */
+function db_list_store_orders($conn, $storeId, $deviceId = null, $date = null, $limit = 100) {
+    $sql = 'SELECT mer_trade_no, amount, status, payuni_trade_no, auth_code, card4_no,
+                   message, payment_method, card_inst, device_id, created_at, updated_at
+              FROM orders
+             WHERE store_id = ?';
+    $types = 'i';
+    $params = array($storeId);
+
+    if ($deviceId !== null && $deviceId !== '') {
+        $sql .= ' AND device_id = ?';
+        $types .= 's';
+        $params[] = $deviceId;
+    }
+    if ($date !== null && $date !== '') {
+        $sql .= ' AND DATE(created_at) = ?';
+        $types .= 's';
+        $params[] = $date;
+    }
+    // 新的排前面 —— 收銀員要找的幾乎都是剛才那筆
+    $sql .= ' ORDER BY id DESC LIMIT ?';
+    $types .= 'i';
+    $params[] = (int) $limit;
+
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, $types, ...$params);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $rows = array();
+    while ($row = mysqli_fetch_assoc($result)) {
+        $rows[] = $row;
+    }
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+/**
+ * 這家商店在指定日期的收款彙總。
+ *
+ * ⚠️ **只計入 status='success'，並扣掉已成功的退款。**
+ * 把 pending 也算進去會讓店員以為收到了實際上沒收到的錢；不扣退款則會讓
+ * 帳面永遠比實際多。這個數字是店員拿來跟現場對帳的，寧可保守。
+ */
+function db_sum_store_orders($conn, $storeId, $deviceId = null, $date = null) {
+    $sql = "SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
+              FROM orders
+             WHERE store_id = ? AND status = 'success'";
+    $types = 'i';
+    $params = array($storeId);
+    if ($deviceId !== null && $deviceId !== '') {
+        $sql .= ' AND device_id = ?';
+        $types .= 's';
+        $params[] = $deviceId;
+    }
+    if ($date !== null && $date !== '') {
+        $sql .= ' AND DATE(created_at) = ?';
+        $types .= 's';
+        $params[] = $date;
+    }
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, $types, ...$params);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+
+    // 退款要一併扣掉，否則帳面會比實際收到的多
+    $sql2 = "SELECT COALESCE(SUM(r.amount), 0) AS refunded
+               FROM refunds r
+               JOIN orders o ON o.mer_trade_no = r.mer_trade_no
+              WHERE o.store_id = ? AND r.status = 'success' AND r.close_type = 2";
+    $types2 = 'i';
+    $params2 = array($storeId);
+    if ($deviceId !== null && $deviceId !== '') {
+        $sql2 .= ' AND o.device_id = ?';
+        $types2 .= 's';
+        $params2[] = $deviceId;
+    }
+    if ($date !== null && $date !== '') {
+        $sql2 .= ' AND DATE(r.created_at) = ?';
+        $types2 .= 's';
+        $params2[] = $date;
+    }
+    $stmt2 = mysqli_prepare($conn, $sql2);
+    mysqli_stmt_bind_param($stmt2, $types2, ...$params2);
+    mysqli_stmt_execute($stmt2);
+    $row2 = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt2));
+    mysqli_stmt_close($stmt2);
+
+    return array(
+        'count' => (int) $row['cnt'],
+        'total' => (int) $row['total'],
+        'refunded' => (int) $row2['refunded'],
+        'net' => (int) $row['total'] - (int) $row2['refunded'],
+    );
+}
+
 /** 查詢單筆訂單目前狀態 */
 function db_find_order($conn, $merTradeNo) {
     $stmt = mysqli_prepare($conn, 'SELECT * FROM orders WHERE mer_trade_no = ?');

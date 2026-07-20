@@ -10,6 +10,6 @@ RedirectMatch 403 ^/newpaytrade/tests/
     Require all denied
 </FilesMatch>
 
-<FilesMatch "^(authorize-direct|refund|query|status|notify-direct|merchant_status|pos_login|linepay-create|linepay-status|notify-scan|linepay-refund|pay|pay-redirect|pay-done|upp-create)\.php$">
+<FilesMatch "^(authorize-direct|refund|query|status|notify-direct|merchant_status|pos_login|linepay-create|linepay-status|notify-scan|linepay-refund|pay|pay-redirect|pay-done|upp-create|pos-orders)\.php$">
     Require all granted
 </FilesMatch>
