@@ -83,6 +83,13 @@ define('PAYUNI_QUERY_URL', 'https://api.payuni.com.tw/api/trade/query');
 // 正式環境：https://api.payuni.com.tw/api/linepay
 define('PAYUNI_LINEPAY_URL', 'https://api.payuni.com.tw/api/linepay');
 
+// LINE Pay 退款（支援全額與部分退款）。
+// ⚠️ 與信用卡的 /api/trade/close 是**完全不同的端點**，沒有 CloseType 的
+//    概念（LINE Pay 沒有「先授權後請款」，付款當下就已扣款）。
+// 測試環境：https://sandbox-api.payuni.com.tw/api/trade/common/refund/linepay
+// 正式環境：https://api.payuni.com.tw/api/trade/common/refund/linepay
+define('PAYUNI_LINEPAY_REFUND_URL', 'https://api.payuni.com.tw/api/trade/common/refund/linepay');
+
 /*
  * ── 代理商專用：查詢合作商店狀態 ──────────────────────────────
  *

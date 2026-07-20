@@ -97,8 +97,8 @@ if (!$order) {
  * 非信用卡的交易一律擋下。
  *
  * 這支整套邏輯（CloseType 1=請款 2=退款 -1/-2=取消、依請款狀態自動選型別）
- * 都是信用卡專屬的。LINE Pay 等非信用卡交易走的是 PAYUNi 的「非信用卡退款
- * 轉匯」，是完全不同的 API —— **那份規格目前還沒拿到**。
+ * 都是信用卡專屬的。LINE Pay 等非信用卡交易走的是完全不同的端點
+ *（LINE Pay：/api/trade/common/refund/linepay，見 linepay-refund.php）。
  *
  * 不擋的話，按下退款會拿信用卡的請退款 API 去處理 LINE Pay 的訂單，結果
  * 無法預期：可能直接報錯，也可能動到不該動的東西。在退款這種事情上，
@@ -108,9 +108,22 @@ $paymentMethod = isset($order['payment_method']) ? $order['payment_method'] : 'c
 if ($paymentMethod !== 'credit') {
     respond(400, array(
         'status' => 'failed',
-        'message' => '這筆是 ' . $paymentMethod . ' 交易，尚未支援線上退款，請聯繫 PAYUNi 處理',
+        'message' => '這筆是 ' . $paymentMethod . ' 交易，請改用對應的退款端點（LINE Pay 請用 linepay-refund.php）',
+        'paymentMethod' => $paymentMethod,
     ));
 }
+
+/*
+ * 用「這筆訂單當初送出時的商店代號」退款，不是 config 的預設值。
+ *
+ * 加入多商店（經銷商→客戶→商店）之後，同一台後端會服務多個商店代號。
+ * 固定用 config 的預設值等於拿 A 商店的身分去退 B 商店的交易 —— PAYUNi
+ * 會拒絕，操作者只會看到看不懂的錯誤，而且**退不掉客人的錢**。
+ *
+ * mer_id 是交易當下的快照，舊資料可能沒有，那種情況退回預設值（那時候
+ * 本來就只有一個商店代號，用預設值是對的）。
+ */
+$refundMerId = !empty($order['mer_id']) ? $order['mer_id'] : PAYUNI_MER_ID;
 
 // 只有授權成功的訂單才有東西可以退
 if ($order['status'] !== 'success') {
@@ -137,7 +150,7 @@ if (empty($order['payuni_trade_no'])) {
 // ---------------------------------------------------------------------------
 $closeStatus = null;
 if (!$closeTypeExplicit) {
-    $queryResult = payuni_fetch_trade_record($merTradeNo);
+    $queryResult = payuni_fetch_trade_record($merTradeNo, $refundMerId);
     if (!$queryResult['ok']) {
         respond(502, array(
             'status' => 'failed',
@@ -217,7 +230,7 @@ if ($closeType === 2) {
 $payuniTradeNo = $order['payuni_trade_no'];
 
 $encryptInfoParams = array(
-    'MerID' => PAYUNI_MER_ID,
+    'MerID' => $refundMerId,
     'TradeNo' => $payuniTradeNo,
     'Timestamp' => (string) time(),
     'CloseType' => (string) $closeType,
@@ -241,7 +254,7 @@ try {
 }
 
 $postFields = http_build_query(array(
-    'MerID' => PAYUNI_MER_ID,
+    'MerID' => $refundMerId,
     'Version' => '1.0', // 請退款 API 固定 1.0，不是授權用的 1.3
     'EncryptInfo' => $encryptInfo,
     'HashInfo' => $hashInfo,
