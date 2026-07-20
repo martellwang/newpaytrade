@@ -148,6 +148,19 @@ function db_create_devices_table_if_not_exists($conn) {
         'mer_id' => "ALTER TABLE orders ADD COLUMN mer_id VARCHAR(32) NULL",
         'store_id' => "ALTER TABLE orders ADD COLUMN store_id INT NULL, ADD INDEX idx_store (store_id)",
         'dealer_id' => "ALTER TABLE orders ADD COLUMN dealer_id INT NULL, ADD INDEX idx_dealer (dealer_id)",
+        /*
+         * 這筆交易用什麼方式收的：credit=信用卡、linepay=LINE Pay 掃碼。
+         *
+         * **不能只靠 provider 分辨** —— provider 是「哪一家上游」（payuni），
+         * 同一家上游底下有多種支付工具，錢的流向、對帳週期、退款管道都不同。
+         *
+         * 尤其是退款：信用卡走 /api/trade/close（分請款/退款/取消授權），
+         * LINE Pay 走「非信用卡退款轉匯」，是完全不同的 API。沒有這個欄位
+         * 就會拿信用卡的退款流程去退 LINE Pay 的錢。
+         *
+         * 預設 credit 讓既有資料自動正確 —— 這個欄位加進來之前的交易全是刷卡。
+         */
+        'payment_method' => "ALTER TABLE orders ADD COLUMN payment_method VARCHAR(16) NOT NULL DEFAULT 'credit', ADD INDEX idx_payment_method (payment_method)",
     );
     foreach ($orderCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM orders LIKE '$col'");
@@ -973,16 +986,16 @@ function db_delete_provider($conn, $name) {
 
 function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null,
                                  $cardInst = 1, $merchantId = null, $merId = null,
-                                 $storeId = null, $dealerId = null) {
+                                 $storeId = null, $dealerId = null, $paymentMethod = 'credit') {
     $stmt = mysqli_prepare($conn,
         'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial,
-                             card_inst, merchant_id, mer_id, store_id, dealer_id)
-         VALUES (?,?,?,?,?,?,?,?,?,?)');
+                             card_inst, merchant_id, mer_id, store_id, dealer_id, payment_method)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)');
     $status = 'pending';
     // 型別字串要跟欄位順序一一對應：整數欄位是 i，其餘 s。
     // 之前 appVersion 就因為型別對錯位置，把 "0.1-dev" 靜默轉成 0。
-    mysqli_stmt_bind_param($stmt, 'sisssiisii', $merTradeNo, $amount, $status, $deviceId, $deviceSerial,
-        $cardInst, $merchantId, $merId, $storeId, $dealerId);
+    mysqli_stmt_bind_param($stmt, 'sisssiisiis', $merTradeNo, $amount, $status, $deviceId, $deviceSerial,
+        $cardInst, $merchantId, $merId, $storeId, $dealerId, $paymentMethod);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('寫入訂單紀錄失敗：' . mysqli_stmt_error($stmt));
     }

@@ -18,12 +18,18 @@ require_once __DIR__ . '/payuni_crypto.php';
  * 向 PAYUNi 查詢單筆交易的即時狀態。
  *
  * @param string $merTradeNo 商店訂單編號
+ * @param string $merId      要用哪個商店代號查。多商店情境下**必須帶** ——
+ *                           拿 A 商店的代號去查 B 商店的交易只會查無資料。
+ *                           留空時退回 config 的預設值（單商店的舊行為）。
  * @return array 成功：array('ok' => true, 'record' => 該筆交易的欄位陣列)
  *               失敗：array('ok' => false, 'message' => 失敗原因)
  */
-function payuni_fetch_trade_record($merTradeNo) {
+function payuni_fetch_trade_record($merTradeNo, $merId = '') {
+    if ($merId === '' || $merId === null) {
+        $merId = PAYUNI_MER_ID;
+    }
     $encryptInfoParams = array(
-        'MerID' => PAYUNI_MER_ID,
+        'MerID' => $merId,
         'MerTradeNo' => $merTradeNo,
         'Timestamp' => (string) time(),
     );
@@ -37,7 +43,7 @@ function payuni_fetch_trade_record($merTradeNo) {
     }
 
     $postFields = http_build_query(array(
-        'MerID' => PAYUNI_MER_ID,
+        'MerID' => $merId,
         'Version' => '2.0', // 查詢是 2.0，跟授權(1.3)、退款(1.0)都不同
         'EncryptInfo' => $encryptInfo,
         'HashInfo' => $hashInfo,

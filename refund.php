@@ -93,6 +93,25 @@ if (!$order) {
     respond(404, array('status' => 'failed', 'message' => '找不到訂單'));
 }
 
+/*
+ * 非信用卡的交易一律擋下。
+ *
+ * 這支整套邏輯（CloseType 1=請款 2=退款 -1/-2=取消、依請款狀態自動選型別）
+ * 都是信用卡專屬的。LINE Pay 等非信用卡交易走的是 PAYUNi 的「非信用卡退款
+ * 轉匯」，是完全不同的 API —— **那份規格目前還沒拿到**。
+ *
+ * 不擋的話，按下退款會拿信用卡的請退款 API 去處理 LINE Pay 的訂單，結果
+ * 無法預期：可能直接報錯，也可能動到不該動的東西。在退款這種事情上，
+ * 明確拒絕遠比「試試看會怎樣」安全。
+ */
+$paymentMethod = isset($order['payment_method']) ? $order['payment_method'] : 'credit';
+if ($paymentMethod !== 'credit') {
+    respond(400, array(
+        'status' => 'failed',
+        'message' => '這筆是 ' . $paymentMethod . ' 交易，尚未支援線上退款，請聯繫 PAYUNi 處理',
+    ));
+}
+
 // 只有授權成功的訂單才有東西可以退
 if ($order['status'] !== 'success') {
     respond(400, array(

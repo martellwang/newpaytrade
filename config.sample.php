@@ -62,6 +62,28 @@ define('PAYUNI_REFUND_URL', 'https://api.payuni.com.tw/api/trade/close');
 define('PAYUNI_QUERY_URL', 'https://api.payuni.com.tw/api/trade/query');
 
 /*
+ * ── LINE Pay 幕後 ─────────────────────────────────────────────
+ *
+ * 收銀機顯示 QR、客人用手機掃碼付款。與信用卡共用同一組 Hash Key / IV，
+ * 只是端點與 Version 不同（LINE Pay 固定 1.2）。
+ *
+ * ⚠️ 開通前這支一定會失敗，需要兩道申請：
+ *   1. 向 PAYUNi 申請開通並**綁定送出請求的伺服器 IP**
+ *   2. 向 LINE Pay 申請成為合作商店，取得 Channel ID & Secret Key
+ *      （會產生額外的交易處理費）
+ *
+ * 測試區可先跳過：申請 LINE Pay 時 Channel ID / Secret 填任意數字即可，
+ * 但手機上仍需安裝真正的 LINE Pay App 並完成綁卡才付得了款。
+ *
+ * 留空的話收銀機的「掃碼收款」會顯示未開通，不影響刷卡。
+ *
+ * 詳細規格見 docs/payuni-linepay.md
+ */
+// 測試環境：https://sandbox-api.payuni.com.tw/api/linepay
+// 正式環境：https://api.payuni.com.tw/api/linepay
+define('PAYUNI_LINEPAY_URL', 'https://api.payuni.com.tw/api/linepay');
+
+/*
  * ── 代理商專用：查詢合作商店狀態 ──────────────────────────────
  *
  * 用來查這個商店代號目前開通了哪些支付工具，以及分期各期數
