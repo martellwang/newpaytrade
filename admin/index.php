@@ -56,7 +56,7 @@ $offset = ($page - 1) * $perPage;
 $stmt = mysqli_prepare(
     $conn,
     "SELECT id, mer_trade_no, amount, status, payuni_trade_no, auth_code, card4_no,
-            message, created_at
+            message, created_at, card_inst
      FROM orders WHERE $whereSql ORDER BY id DESC LIMIT ? OFFSET ?"
 );
 mysqli_stmt_bind_param($stmt, $types . 'ii', ...array_merge($args, array($perPage, $offset)));
@@ -129,7 +129,12 @@ admin_header('交易紀錄', 'index.php');
       <tr>
         <td><?= h($r['created_at']) ?></td>
         <td><?= h($r['mer_trade_no']) ?></td>
-        <td class="right"><?= h(money($r['amount'])) ?></td>
+        <td class="right">
+          <?= h(money($r['amount'])) ?>
+          <?php if (isset($r['card_inst']) && (int) $r['card_inst'] > 1): ?>
+            <div class="muted" style="font-size:12px">分期 <?= h((int) $r['card_inst']) ?> 期</div>
+          <?php endif; ?>
+        </td>
         <td><?= status_badge($r['status']) ?></td>
         <td><?= h($r['card4_no'] ?: '—') ?></td>
         <td><?= h($r['auth_code'] ?: '—') ?></td>
