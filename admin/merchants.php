@@ -20,6 +20,7 @@ require_once __DIR__ . '/layout.php';
 
 $conn = db_connect();
 db_create_merchants_table_if_not_exists($conn);
+db_create_store_staff_table_if_not_exists($conn);
 db_create_pos_locks_table_if_not_exists($conn);
 
 $flash = null;
@@ -302,10 +303,10 @@ admin_header('客戶管理', 'merchants.php');
 
 <div class="card wrap">
   <table>
-    <thead><tr><th>商店名稱</th><th>商店代號 MerID</th><th>上游</th><th>狀態</th><th>交易筆數</th><th>備註</th><th></th></tr></thead>
+    <thead><tr><th>商店名稱</th><th>商店代號 MerID</th><th>上游</th><th>狀態</th><th>交易筆數</th><th>店員</th><th>備註</th><th></th></tr></thead>
     <tbody>
       <?php if (!$stores): ?>
-        <tr><td colspan="7" class="muted">尚未建立商店。沒有商店的話收銀機無法登入。</td></tr>
+        <tr><td colspan="8" class="muted">尚未建立商店。沒有商店的話收銀機無法登入。</td></tr>
       <?php endif; ?>
       <?php foreach ($stores as $st): ?>
       <tr>
@@ -316,8 +317,12 @@ admin_header('客戶管理', 'merchants.php');
               ? '<span class="badge s-success">啟用</span>'
               : '<span class="badge s-failed">停用</span>' ?></td>
         <td><?= number_format(db_count_orders_by_store($conn, (int) $st['id'])) ?></td>
+        <td><?= count(db_list_staff($conn, (int) $st['id'])) ?> 人</td>
         <td class="muted"><?= h($st['note'] ?: '') ?></td>
-        <td><a class="btn2" href="?edit=<?= (int) $editRow['id'] ?>&amp;store=<?= (int) $st['id'] ?>">編輯</a></td>
+        <td>
+          <a class="btn2" href="?edit=<?= (int) $editRow['id'] ?>&amp;store=<?= (int) $st['id'] ?>">編輯</a>
+          <a class="btn2" href="staff.php?store=<?= (int) $st['id'] ?>" style="margin-left:6px">店員</a>
+        </td>
       </tr>
       <?php endforeach; ?>
     </tbody>

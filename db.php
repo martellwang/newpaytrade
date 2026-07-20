@@ -161,6 +161,17 @@ function db_create_devices_table_if_not_exists($conn) {
          * 預設 credit 讓既有資料自動正確 —— 這個欄位加進來之前的交易全是刷卡。
          */
         'payment_method' => "ALTER TABLE orders ADD COLUMN payment_method VARCHAR(16) NOT NULL DEFAULT 'credit', ADD INDEX idx_payment_method (payment_method)",
+        /*
+         * 這筆交易是哪位店員經手的。
+         *
+         * 可為 NULL —— 沒有開班就直接收款仍然允許（不能因為店員忘了開班
+         * 就讓門市收不了錢），只是那些交易在交班單上會歸到「未指定」。
+         *
+         * 存 id 也存姓名快照：店員離職後資料可能被刪除或改名，但歷史交易
+         * 仍要查得出當時是誰收的 —— 這正是爭議發生時最需要的資訊。
+         */
+        'staff_id' => "ALTER TABLE orders ADD COLUMN staff_id INT NULL, ADD INDEX idx_staff (staff_id)",
+        'staff_name' => "ALTER TABLE orders ADD COLUMN staff_name VARCHAR(64) NULL",
     );
     foreach ($orderCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM orders LIKE '$col'");
@@ -512,6 +523,138 @@ function db_create_pos_locks_table_if_not_exists($conn) {
     if (!mysqli_query($conn, $sql)) {
         throw new Exception('建立 pos_device_locks 資料表失敗：' . mysqli_error($conn));
     }
+}
+
+// ── 店員 ────────────────────────────────────────────────────────
+
+/**
+ * 建立 store_staff 資料表：商店底下的個別店員。
+ *
+ * ── 為什麼要獨立一層，而不是把店員做成另一組登入帳號 ──────
+ *
+ * 現有的登入（merchants.login_account）是**機器綁商店**用的：一家店的多台
+ * 收銀機共用同一組帳密，登入一次可以用很久。那個設計是對的，不要動它。
+ *
+ * 店員身分要解決的是不同的問題：「這一班**誰**收了多少」、「這筆退款是
+ * 誰按的」。它的生命週期是一個班次，不是一台機器的綁定。
+ *
+ * 兩者正交，所以疊上去而不是改寫。收銀機仍先用商店帳號登入，開班時再由
+ * 店員輸入工號與 PIN。
+ *
+ * ── PIN 而不是密碼 ──
+ * 店員在櫃檯、客人面前、可能戴著手套輸入，長密碼不切實際。PIN 的強度不高，
+ * 所以**它不能單獨用來認證** —— 前提是這台機器已經用商店帳號登入過了，
+ * PIN 只是在已授權的機器上區分「是哪位同事」。
+ */
+function db_create_store_staff_table_if_not_exists($conn) {
+    $sql = "
+        CREATE TABLE IF NOT EXISTS store_staff (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            store_id INT NOT NULL,
+            staff_code VARCHAR(16) NOT NULL,
+            name VARCHAR(64) NOT NULL,
+            pin_hash VARCHAR(255) NOT NULL,
+            can_refund TINYINT(1) NOT NULL DEFAULT 0,
+            active TINYINT(1) NOT NULL DEFAULT 1,
+            note VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            -- 工號只要在同一家店裡唯一就好。不同店的店員可以都叫 01，
+            -- 強制全系統唯一只會讓店家沒辦法用自己習慣的編號。
+            UNIQUE KEY uniq_store_code (store_id, staff_code),
+            INDEX idx_store (store_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 store_staff 資料表失敗：' . mysqli_error($conn));
+    }
+}
+
+function db_list_staff($conn, $storeId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT * FROM store_staff WHERE store_id = ? ORDER BY staff_code');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $rows = array();
+    while ($row = mysqli_fetch_assoc($result)) {
+        $rows[] = $row;
+    }
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+function db_find_staff($conn, $id) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM store_staff WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
+}
+
+/** 依工號找店員（開班時用）。只找啟用中的。 */
+function db_find_staff_by_code($conn, $storeId, $staffCode) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT * FROM store_staff WHERE store_id = ? AND staff_code = ? AND active = 1');
+    mysqli_stmt_bind_param($stmt, 'is', $storeId, $staffCode);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
+}
+
+/**
+ * 新增或更新店員。
+ *
+ * $pin 傳空字串代表「不修改現有 PIN」—— 編輯姓名或權限時不該被迫重設 PIN。
+ * 新增時則必填。
+ */
+function db_save_staff($conn, $id, $storeId, $staffCode, $name, $pin, $canRefund, $active, $note) {
+    if ($id) {
+        if ($pin !== '') {
+            $hash = password_hash($pin, PASSWORD_DEFAULT);
+            $stmt = mysqli_prepare($conn,
+                'UPDATE store_staff SET staff_code=?, name=?, pin_hash=?, can_refund=?,
+                        active=?, note=? WHERE id=?');
+            mysqli_stmt_bind_param($stmt, 'sssiisi', $staffCode, $name, $hash,
+                $canRefund, $active, $note, $id);
+        } else {
+            $stmt = mysqli_prepare($conn,
+                'UPDATE store_staff SET staff_code=?, name=?, can_refund=?,
+                        active=?, note=? WHERE id=?');
+            mysqli_stmt_bind_param($stmt, 'ssiisi', $staffCode, $name,
+                $canRefund, $active, $note, $id);
+        }
+    } else {
+        $hash = password_hash($pin, PASSWORD_DEFAULT);
+        $stmt = mysqli_prepare($conn,
+            'INSERT INTO store_staff (store_id, staff_code, name, pin_hash, can_refund, active, note)
+             VALUES (?,?,?,?,?,?,?)');
+        mysqli_stmt_bind_param($stmt, 'isssiis', $storeId, $staffCode, $name, $hash,
+            $canRefund, $active, $note);
+    }
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存店員失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+function db_delete_staff($conn, $id) {
+    $stmt = mysqli_prepare($conn, 'DELETE FROM store_staff WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/** 這位店員經手過幾筆交易 —— 有紀錄的就不該直接刪除，改為停用 */
+function db_count_orders_by_staff($conn, $staffId) {
+    $stmt = mysqli_prepare($conn, 'SELECT COUNT(*) AS c FROM orders WHERE staff_id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $staffId);
+    mysqli_stmt_execute($stmt);
+    $c = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
+    mysqli_stmt_close($stmt);
+    return $c;
 }
 
 // ── 掃碼付款中轉頁 ──────────────────────────────────────────────
