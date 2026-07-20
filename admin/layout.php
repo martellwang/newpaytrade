@@ -4,6 +4,7 @@
 function admin_header($title, $active = '') {
     $nav = array(
         'index.php' => '交易紀錄',
+        'pending.php' => '進行中',
         'report.php' => '對帳報表',
         'devices.php' => '收銀機',
     );

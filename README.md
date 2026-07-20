@@ -42,6 +42,7 @@ HTTP `429`（見下方「速率限制」）。
 | 頁面 | 說明 |
 |---|---|
 | `admin/index.php` | 交易紀錄查詢：日期區間、狀態、訂單編號／交易序號／卡號末四碼 |
+| `admin/pending.php` | 進行中交易：一次列出所有尚未定案（`pending`）的交易，不限日期，最舊在前，方便集中補正 |
 | `admin/report.php` | 對帳報表：區間總計 + 逐日明細（成功／退款／淨額） |
 | `admin/detail.php` | 單筆明細，含退款紀錄 |
 | `admin/export.php` | 匯出 CSV（含 UTF-8 BOM，Excel 開啟不亂碼） |
