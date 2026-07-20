@@ -4,6 +4,43 @@
 // 部署到主機後，請直接在主機上編輯這個檔案填入正式數值，不要在本機
 // 填好正式密鑰後再上傳。
 
+/*
+ * ══ 上游金流機構 ═══════════════════════════════════════════════
+ *
+ * 這套系統是 TMS，未來會接不只一家上游（其他金流商、收單銀行、電子支付
+ * 機構）。設定有新舊兩種寫法，**兩種都能動**：
+ *
+ * ── 舊寫法（目前正式環境在用）──
+ *   直接用下面的 PAYUNI_* 常數。系統會自動組成一家名為 payuni 的上游。
+ *   只有一家上游時這樣就夠，不需要改。
+ *
+ * ── 新寫法（要接第二家時改用這個）──
+ *   定義 $PROVIDERS 陣列，一家一個區塊，然後用 DEFAULT_PROVIDER 指定
+ *   預設走哪家。有 $PROVIDERS 時系統會忽略下面的 PAYUNI_* 常數。
+ *
+ *   $PROVIDERS = array(
+ *       'payuni' => array(
+ *           'label' => 'PAYUNi 統一金流',
+ *           'driver' => 'payuni',          // 對應 providers/payuni.php
+ *           'enabled' => true,
+ *           'credentials' => array(
+ *               'mer_id' => '', 'hash_key' => '', 'hash_iv' => '', 'agent_id' => '',
+ *           ),
+ *           'endpoints' => array(
+ *               'authorize' => 'https://api.payuni.com.tw/api/credit',
+ *               'close' => 'https://api.payuni.com.tw/api/trade/close',
+ *               'query' => 'https://api.payuni.com.tw/api/trade/query',
+ *               'merchant_status' => 'https://api.payuni.com.tw/api/agent/search_merchant_status',
+ *           ),
+ *       ),
+ *       // 'somebank' => array('driver' => 'somebank', ...),
+ *   );
+ *   define('DEFAULT_PROVIDER', 'payuni');
+ *
+ * 每家上游的加密方式、欄位名稱、支援功能都不一樣，那些寫在
+ * providers/<driver>.php 裡，不要塞進這個設定檔。
+ */
+
 // PAYUNi 統一金流串接資訊（從 PAYUNi 後台「會員 > 商店清單 > 串接設定」取得）
 define('PAYUNI_MER_ID', '');
 define('PAYUNI_HASH_KEY', ''); // 32 碼
@@ -23,6 +60,29 @@ define('PAYUNI_REFUND_URL', 'https://api.payuni.com.tw/api/trade/close');
 // 測試環境：https://sandbox-api.payuni.com.tw/api/trade/query
 // 正式環境：https://api.payuni.com.tw/api/trade/query
 define('PAYUNI_QUERY_URL', 'https://api.payuni.com.tw/api/trade/query');
+
+/*
+ * ── 代理商專用：查詢合作商店狀態 ──────────────────────────────
+ *
+ * 用來查這個商店代號目前開通了哪些支付工具，以及分期各期數
+ *（Inst3/6/9/12/18/24/30）分別是否可用。收銀 App 據此把沒開通的
+ * 期數在畫面上以灰色停用，避免收銀員選了之後在客人面前才失敗。
+ *
+ * 上面的 PAYUNI_HASH_KEY / PAYUNI_HASH_IV **就是代理商的金鑰** ——
+ * 這也正是三支交易 API 都要帶 IsPlatForm=1 的原因：那個參數就是在宣告
+ * 「我現在以代理商身分串接」。所以這裡只需要補一個 AgentID。
+ *
+ * ⚠️ 代理商專區有自己的一份 IP 白名單，跟幕後授權那份是分開的。
+ *    沒設定的話這支 API 會被擋，但交易 API 仍然正常 —— 兩者互不影響。
+ *
+ * 留空的話查詢功能會自動停用，收銀機退回「所有期數都可選」的行為，
+ * 不會因為查不到狀態就不能收款。
+ */
+define('PAYUNI_AGENT_ID', '');  // 4 個英文字母全大寫
+
+// 測試環境：https://sandbox-api.payuni.com.tw/api/agent/search_merchant_status
+// 正式環境：https://api.payuni.com.tw/api/agent/search_merchant_status
+define('PAYUNI_MERCHANT_STATUS_URL', 'https://api.payuni.com.tw/api/agent/search_merchant_status');
 
 // 這個服務對外的網址，用來組出 NotifyURL
 define('PUBLIC_BASE_URL', 'https://www.newpay.com.tw/newpaytrade');

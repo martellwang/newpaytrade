@@ -6,6 +6,7 @@ function admin_header($title, $active = '') {
         'index.php' => '交易紀錄',
         'report.php' => '對帳報表',
         'devices.php' => '收銀機',
+        'merchant.php' => '商店狀態',
         'apk.php' => '安裝檔',
     );
     ?><!DOCTYPE html>

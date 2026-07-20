@@ -10,6 +10,6 @@ RedirectMatch 403 ^/newpaytrade/tests/
     Require all denied
 </FilesMatch>
 
-<FilesMatch "^(authorize-direct|refund|query|status|notify-direct)\.php$">
+<FilesMatch "^(authorize-direct|refund|query|status|notify-direct|merchant_status)\.php$">
     Require all granted
 </FilesMatch>
