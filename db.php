@@ -477,6 +477,9 @@ function db_create_merchants_table_if_not_exists($conn) {
             store_id INT NULL,
             token_hash CHAR(64) NOT NULL UNIQUE,
             device_id VARCHAR(64) NULL,
+            -- 目前開班中的店員。NULL = 沒人開班（仍可收款，只是查不到經手人）
+            staff_id INT NULL,
+            shift_started_at DATETIME NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_used_at DATETIME NULL,
             INDEX idx_merchant (merchant_id)
@@ -485,6 +488,73 @@ function db_create_merchants_table_if_not_exists($conn) {
     if (!mysqli_query($conn, $sql4)) {
         throw new Exception('建立 merchant_sessions 資料表失敗：' . mysqli_error($conn));
     }
+
+    /*
+     * 既有的資料表不會因為 CREATE TABLE IF NOT EXISTS 而長出新欄位，
+     * 要另外補。已經上線的主機走的是這條路，不是上面的建表。
+     */
+    $sessionCols = array(
+        'staff_id' => "ALTER TABLE merchant_sessions ADD COLUMN staff_id INT NULL",
+        'shift_started_at' => "ALTER TABLE merchant_sessions ADD COLUMN shift_started_at DATETIME NULL",
+    );
+    foreach ($sessionCols as $col => $ddl) {
+        $res = mysqli_query($conn, "SHOW COLUMNS FROM merchant_sessions LIKE '$col'");
+        if ($res && mysqli_num_rows($res) === 0) {
+            if (!mysqli_query($conn, $ddl)) {
+                throw new Exception("merchant_sessions 新增 $col 欄位失敗：" . mysqli_error($conn));
+            }
+        }
+    }
+}
+
+/**
+ * 店員開班：把店員綁到這個收銀機 session 上。
+ *
+ * 綁在 session 而不是由 App 每次交易帶 staff_id —— 與商店代號同一個原則：
+ * **身分由後端決定，不讓呼叫端指定**。App 自己帶的話，改一個數字就能把
+ * 交易記到別人頭上，而交班單、退款權限都是靠這個欄位算的。
+ */
+function db_start_shift($conn, $sessionId, $staffId) {
+    $stmt = mysqli_prepare($conn,
+        'UPDATE merchant_sessions SET staff_id = ?, shift_started_at = NOW() WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'ii', $staffId, $sessionId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('開班失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 交班：解除綁定。收銀機仍保持登入，只是回到「沒人開班」的狀態。 */
+function db_end_shift($conn, $sessionId) {
+    $stmt = mysqli_prepare($conn,
+        'UPDATE merchant_sessions SET staff_id = NULL, shift_started_at = NULL WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $sessionId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/**
+ * 這個班次的收款彙總。
+ *
+ * **輕量做法：不建 shifts 資料表**，直接用「這位店員 + 開班時間之後」去算。
+ * 班次資料本來就能從交易紀錄推導出來，多開一張表只是多一份要同步的狀態。
+ *
+ * 代價：交班之後那個班次就不再查得到（沒有留存）。如果日後需要保留歷史
+ * 班次報表，再補一張 shifts 表把彙總結果存下來即可，現有欄位都夠用。
+ */
+function db_sum_shift($conn, $storeId, $staffId, $since) {
+    $stmt = mysqli_prepare($conn,
+        "SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
+           FROM orders
+          WHERE store_id = ? AND staff_id = ? AND status = 'success' AND created_at >= ?");
+    mysqli_stmt_bind_param($stmt, 'iis', $storeId, $staffId, $since);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return array(
+        'count' => (int) $row['cnt'],
+        'total' => (int) $row['total'],
+    );
 }
 
 /**
@@ -1091,13 +1161,15 @@ function db_find_session_by_token($conn, $token) {
     }
     $hash = hash('sha256', $token);
     $stmt = mysqli_prepare($conn,
-        'SELECT s.id AS session_id, s.store_id,
+        'SELECT s.id AS session_id, s.store_id, s.staff_id, s.shift_started_at,
                 m.id AS merchant_id, m.name AS merchant_name, m.dealer_id,
                 m.enabled AS merchant_enabled,
-                st.mer_id, st.name AS store_name, st.provider, st.enabled AS store_enabled
+                st.mer_id, st.name AS store_name, st.provider, st.enabled AS store_enabled,
+                sf.name AS staff_name, sf.staff_code, sf.can_refund, sf.active AS staff_active
          FROM merchant_sessions s
          JOIN merchants m ON m.id = s.merchant_id
          LEFT JOIN merchant_stores st ON st.id = s.store_id
+         LEFT JOIN store_staff sf ON sf.id = s.staff_id
          WHERE s.token_hash = ?');
     mysqli_stmt_bind_param($stmt, 's', $hash);
     mysqli_stmt_execute($stmt);
@@ -1217,16 +1289,18 @@ function db_delete_provider($conn, $name) {
 
 function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null,
                                  $cardInst = 1, $merchantId = null, $merId = null,
-                                 $storeId = null, $dealerId = null, $paymentMethod = 'credit') {
+                                 $storeId = null, $dealerId = null, $paymentMethod = 'credit',
+                                 $staffId = null, $staffName = null) {
     $stmt = mysqli_prepare($conn,
         'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial,
-                             card_inst, merchant_id, mer_id, store_id, dealer_id, payment_method)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+                             card_inst, merchant_id, mer_id, store_id, dealer_id, payment_method,
+                             staff_id, staff_name)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
     $status = 'pending';
     // 型別字串要跟欄位順序一一對應：整數欄位是 i，其餘 s。
     // 之前 appVersion 就因為型別對錯位置，把 "0.1-dev" 靜默轉成 0。
-    mysqli_stmt_bind_param($stmt, 'sisssiisiis', $merTradeNo, $amount, $status, $deviceId, $deviceSerial,
-        $cardInst, $merchantId, $merId, $storeId, $dealerId, $paymentMethod);
+    mysqli_stmt_bind_param($stmt, 'sisssiisiisis', $merTradeNo, $amount, $status, $deviceId, $deviceSerial,
+        $cardInst, $merchantId, $merId, $storeId, $dealerId, $paymentMethod, $staffId, $staffName);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('寫入訂單紀錄失敗：' . mysqli_stmt_error($stmt));
     }
@@ -1269,7 +1343,8 @@ function db_update_order_result($conn, $merTradeNo, $status, $payuniTradeNo, $au
  */
 function db_list_store_orders($conn, $storeId, $deviceId = null, $date = null, $limit = 100) {
     $sql = 'SELECT mer_trade_no, amount, status, payuni_trade_no, auth_code, card4_no,
-                   message, payment_method, card_inst, device_id, created_at, updated_at
+                   message, payment_method, card_inst, device_id, staff_name,
+                   created_at, updated_at
               FROM orders
              WHERE store_id = ?';
     $types = 'i';
@@ -1392,13 +1467,26 @@ function db_sum_refunded_amount($conn, $merTradeNo) {
 }
 
 /** 退款送出前先寫一筆 pending 紀錄，回傳這筆的 id 供後續更新 */
-function db_insert_pending_refund($conn, $merTradeNo, $payuniTradeNo, $closeType, $amount) {
+function db_insert_pending_refund($conn, $merTradeNo, $payuniTradeNo, $closeType, $amount,
+                                  $staffId = null, $staffName = null) {
+    // refunds 也要記經手人。退款是把錢還出去，「誰按的」比收款更需要留存。
+    foreach (array(
+        'staff_id' => "ALTER TABLE refunds ADD COLUMN staff_id INT NULL",
+        'staff_name' => "ALTER TABLE refunds ADD COLUMN staff_name VARCHAR(64) NULL",
+    ) as $col => $ddl) {
+        $res = mysqli_query($conn, "SHOW COLUMNS FROM refunds LIKE '$col'");
+        if ($res && mysqli_num_rows($res) === 0) {
+            mysqli_query($conn, $ddl);
+        }
+    }
     $stmt = mysqli_prepare(
         $conn,
-        'INSERT INTO refunds (mer_trade_no, payuni_trade_no, close_type, amount, status) VALUES (?, ?, ?, ?, ?)'
+        'INSERT INTO refunds (mer_trade_no, payuni_trade_no, close_type, amount, status,
+                              staff_id, staff_name) VALUES (?, ?, ?, ?, ?, ?, ?)'
     );
     $status = 'pending';
-    mysqli_stmt_bind_param($stmt, 'ssiis', $merTradeNo, $payuniTradeNo, $closeType, $amount, $status);
+    mysqli_stmt_bind_param($stmt, 'ssiisis', $merTradeNo, $payuniTradeNo, $closeType, $amount,
+        $status, $staffId, $staffName);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('寫入退款紀錄失敗：' . mysqli_stmt_error($stmt));
     }

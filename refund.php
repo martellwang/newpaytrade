@@ -34,6 +34,7 @@ require_once __DIR__ . '/payuni_error_codes.php';
 require_once __DIR__ . '/payuni_query.php';
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/rate_limit.php';
+require_once __DIR__ . '/pos_auth.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -87,6 +88,42 @@ if ($rateLimitMessage !== null) {
     respond(429, array('status' => 'failed', 'message' => $rateLimitMessage));
 }
 rl_record_attempt($conn);
+
+/*
+ * ── 退款權限 ──────────────────────────────────────────────────
+ *
+ * 帶了收銀機 token 就是門市在退款，必須是有退款權限的店員。
+ * 沒帶 token 則是後台在退（admin/ 有自己的登入），照舊放行。
+ *
+ * ⚠️ 這裡的判斷基準是「有沒有帶 token」，不是「token 有沒有效」——
+ *    無效的 token 會在 pos_resolve_identity 就被擋下並回 401，
+ *    不會掉到後台那條路上變成免驗證放行。
+ */
+$posToken = isset($_SERVER['HTTP_X_POS_TOKEN']) ? $_SERVER['HTTP_X_POS_TOKEN'] : '';
+$refundStaffId = null;
+$refundStaffName = null;
+if ($posToken !== '') {
+    $identity = pos_resolve_identity($posToken, false);
+    if (!$identity['ok']) {
+        respond($identity['httpCode'], $identity['body']);
+    }
+    if (!$identity['staffId']) {
+        respond(403, array(
+            'status' => 'failed',
+            'message' => '退款需要先開班。請由有退款權限的人員開班後再操作。',
+            'needShift' => true,
+        ));
+    }
+    if (!$identity['canRefund']) {
+        respond(403, array(
+            'status' => 'failed',
+            'message' => '目前開班的人員沒有退款權限，請由店長或值班主管操作。',
+            'noPermission' => true,
+        ));
+    }
+    $refundStaffId = $identity['staffId'];
+    $refundStaffName = $identity['staffName'];
+}
 
 $order = db_find_order($conn, $merTradeNo);
 if (!$order) {
@@ -259,7 +296,8 @@ try {
 // 送出前先留一筆 pending，就算連線逾時也查得到曾經發動過退款
 $refundId = null;
 try {
-    $refundId = db_insert_pending_refund($conn, $merTradeNo, $payuniTradeNo, $closeType, $amount);
+    $refundId = db_insert_pending_refund($conn, $merTradeNo, $payuniTradeNo, $closeType, $amount,
+        $refundStaffId, $refundStaffName);
 } catch (Exception $e) {
     error_log('寫入 pending 退款紀錄失敗：' . $e->getMessage());
 }

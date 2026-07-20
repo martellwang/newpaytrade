@@ -148,7 +148,7 @@ if ($conn) {
         try {
             db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId, $deviceSerial,
                 1, $identity['merchantId'], $merIdForTrade, $identity['storeId'],
-                $identity['dealerId'], 'linepay');
+                $identity['dealerId'], 'linepay', $identity['staffId'], $identity['staffName']);
         } catch (Exception $e) {
             error_log('寫入 LINE Pay pending 訂單失敗：' . $e->getMessage());
         }

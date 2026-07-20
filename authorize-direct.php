@@ -64,6 +64,8 @@ $session = null;
 $merchantId = null;
 $storeId = null;
 $dealerId = null;
+$staffId = null;
+$staffName = null;
 $merIdForTrade = defined('PAYUNI_MER_ID') ? PAYUNI_MER_ID : '';
 
 if ($posToken !== '') {
@@ -96,6 +98,11 @@ if ($posToken !== '') {
     $storeId = (int) $session['store_id'];
     $dealerId = $session['dealer_id'] !== null ? (int) $session['dealer_id'] : null;
     $merIdForTrade = $session['mer_id'];
+    // 目前開班的店員。沒開班（或該店員已停用）就記 NULL —— 不擋交易。
+    if (!empty($session['staff_id']) && (int) $session['staff_active'] === 1) {
+        $staffId = (int) $session['staff_id'];
+        $staffName = $session['staff_name'];
+    }
 }
 
 if ($merIdForTrade === '') {
@@ -258,7 +265,8 @@ if ($conn) {
 
     try {
         db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId, $deviceSerial,
-            $cardInst, $merchantId, $merIdForTrade, $storeId, $dealerId);
+            $cardInst, $merchantId, $merIdForTrade, $storeId, $dealerId, 'credit',
+            $staffId, $staffName);
     } catch (Exception $e) {
         error_log('寫入 pending 訂單失敗：' . $e->getMessage());
         // 資料庫寫入失敗不擋交易，continue，但要記 log 之後追查

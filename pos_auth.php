@@ -44,8 +44,10 @@ function pos_resolve_identity($posToken, $allowLegacy = false) {
                 'status' => 'failed', 'message' => '系統尚未設定商店代號',
             ));
         }
-        return array('ok' => true, 'merchantId' => null, 'storeId' => null,
-                     'dealerId' => null, 'merId' => $fallback);
+        return array('ok' => true, 'sessionId' => null, 'merchantId' => null,
+                     'storeId' => null, 'dealerId' => null, 'merId' => $fallback,
+                     'staffId' => null, 'staffName' => null, 'staffCode' => null,
+                     'canRefund' => false, 'shiftStartedAt' => null);
     }
 
     try {
@@ -78,11 +80,27 @@ function pos_resolve_identity($posToken, $allowLegacy = false) {
         ));
     }
 
+    /*
+     * 目前開班的店員。可能沒有 —— 沒開班仍然可以收款，那些交易的經手人
+     * 記為 NULL。不能因為店員忘了開班就讓門市收不了錢。
+     *
+     * 店員被停用時視同沒開班：不擋交易，但不再把交易記到他頭上，也不讓他
+     * 用停用前留下的班次去退款。
+     */
+    $staffActive = isset($session['staff_active']) && (int) $session['staff_active'] === 1;
+    $staffId = ($staffActive && !empty($session['staff_id'])) ? (int) $session['staff_id'] : null;
+
     return array(
         'ok' => true,
+        'sessionId' => (int) $session['session_id'],
         'merchantId' => (int) $session['merchant_id'],
         'storeId' => (int) $session['store_id'],
         'dealerId' => $session['dealer_id'] !== null ? (int) $session['dealer_id'] : null,
         'merId' => $session['mer_id'],
+        'staffId' => $staffId,
+        'staffName' => $staffId ? $session['staff_name'] : null,
+        'staffCode' => $staffId ? $session['staff_code'] : null,
+        'canRefund' => $staffId ? ((int) $session['can_refund'] === 1) : false,
+        'shiftStartedAt' => $staffId ? $session['shift_started_at'] : null,
     );
 }

@@ -118,7 +118,7 @@ if (!$existing) {
     try {
         db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId, $deviceSerial,
             1, $identity['merchantId'], $identity['merId'], $identity['storeId'],
-            $identity['dealerId'], 'wallet');
+            $identity['dealerId'], 'wallet', $identity['staffId'], $identity['staffName']);
     } catch (Exception $e) {
         error_log('寫入行動支付 pending 訂單失敗：' . $e->getMessage());
         respond(500, array('status' => 'failed', 'message' => '系統忙碌中，請稍後再試'));

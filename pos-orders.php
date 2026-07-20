@@ -101,6 +101,8 @@ foreach ($orders as $o) {
         'createdAt' => $o['created_at'],
         // 讓店長看全店時分得出是哪一台收的
         'deviceId' => $o['device_id'],
+        // 經手人。沒開班就收款的交易這裡是空的
+        'staffName' => isset($o['staff_name']) ? $o['staff_name'] : null,
     );
 }
 
