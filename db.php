@@ -334,6 +334,95 @@ function db_save_merchant_status($conn, $merId, $payload) {
     mysqli_stmt_close($stmt);
 }
 
+/**
+ * 上游金流機構的設定。
+ *
+ * credentials_enc 是加密後的 JSON（見 providers.php 的 provider_secret_*）。
+ * **絕對不要改成明文儲存** —— 資料庫備份、SQL 注入、管理帳號外洩，任何
+ * 一個都會把所有上游的串接金鑰一次交出去。
+ */
+function db_create_providers_table_if_not_exists($conn) {
+    $sql = "
+        CREATE TABLE IF NOT EXISTS providers (
+            name VARCHAR(32) NOT NULL PRIMARY KEY,
+            label VARCHAR(64) NOT NULL,
+            driver VARCHAR(32) NOT NULL,
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+            endpoints TEXT NULL,
+            credentials_enc TEXT NULL,
+            note VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 providers 資料表失敗：' . mysqli_error($conn));
+    }
+}
+
+function db_list_providers($conn) {
+    $res = mysqli_query($conn, 'SELECT * FROM providers ORDER BY name');
+    return $res ? mysqli_fetch_all($res, MYSQLI_ASSOC) : array();
+}
+
+function db_find_provider($conn, $name) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM providers WHERE name = ?');
+    mysqli_stmt_bind_param($stmt, 's', $name);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+/**
+ * 新增或更新上游。
+ * @param string|null $credentialsEnc 傳 null 代表「不變更既有金鑰」——
+ *        編輯畫面不會把金鑰讀回瀏覽器，留空就是保持原值。
+ */
+function db_save_provider($conn, $name, $label, $driver, $enabled, $endpointsJson, $credentialsEnc, $note) {
+    if ($credentialsEnc === null) {
+        $stmt = mysqli_prepare(
+            $conn,
+            'INSERT INTO providers (name, label, driver, enabled, endpoints, note)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE label=VALUES(label), driver=VALUES(driver),
+                 enabled=VALUES(enabled), endpoints=VALUES(endpoints), note=VALUES(note)'
+        );
+        mysqli_stmt_bind_param($stmt, 'sssiss', $name, $label, $driver, $enabled, $endpointsJson, $note);
+    } else {
+        $stmt = mysqli_prepare(
+            $conn,
+            'INSERT INTO providers (name, label, driver, enabled, endpoints, credentials_enc, note)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE label=VALUES(label), driver=VALUES(driver),
+                 enabled=VALUES(enabled), endpoints=VALUES(endpoints),
+                 credentials_enc=VALUES(credentials_enc), note=VALUES(note)'
+        );
+        mysqli_stmt_bind_param($stmt, 'sssisss', $name, $label, $driver, $enabled, $endpointsJson, $credentialsEnc, $note);
+    }
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存上游設定失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 這家上游被幾筆交易用過。有交易就不該刪掉 —— 歷史紀錄會失去歸屬。 */
+function db_count_orders_by_provider($conn, $name) {
+    $stmt = mysqli_prepare($conn, 'SELECT COUNT(*) AS c FROM orders WHERE provider = ?');
+    mysqli_stmt_bind_param($stmt, 's', $name);
+    mysqli_stmt_execute($stmt);
+    $c = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
+    mysqli_stmt_close($stmt);
+    return $c;
+}
+
+function db_delete_provider($conn, $name) {
+    $stmt = mysqli_prepare($conn, 'DELETE FROM providers WHERE name = ?');
+    mysqli_stmt_bind_param($stmt, 's', $name);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
 function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null, $cardInst = 1) {
     $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial, card_inst) VALUES (?, ?, ?, ?, ?, ?)');
     $status = 'pending';

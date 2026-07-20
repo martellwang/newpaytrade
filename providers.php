@@ -18,6 +18,61 @@
  */
 
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/db.php';
+
+/*
+ * ══ 金鑰的加密儲存 ═══════════════════════════════════════════════
+ *
+ * 上游的串接金鑰存在資料庫（讓管理介面可以線上新增／編輯），但**一定要
+ * 加密**：資料庫備份、SQL 注入、管理帳號外洩，任何一個都會把明文金鑰
+ * 一次全部交出去。
+ *
+ * 加密金鑰本身**必須放在 config.php，不能放資料庫** —— 鑰匙跟鎖放在
+ * 同一個抽屜等於沒鎖。config.php 不進版控、也不在 web 可讀範圍。
+ *
+ * 產生一把新的：
+ *   php -r "echo bin2hex(random_bytes(32));"
+ * 填進 config.php：
+ *   define('PROVIDER_SECRET_KEY', '<那 64 個十六進位字元>');
+ *
+ * ⚠️ 這把金鑰換掉的話，資料庫裡已加密的上游設定就解不開了，要重新輸入。
+ */
+
+/** 加密金鑰是否已設定。沒設定就不能把金鑰存進資料庫。 */
+function provider_secret_key_ready() {
+    return defined('PROVIDER_SECRET_KEY') && strlen(PROVIDER_SECRET_KEY) >= 32;
+}
+
+function provider_secret_encrypt($plain) {
+    if (!provider_secret_key_ready()) {
+        throw new Exception('尚未設定 PROVIDER_SECRET_KEY，無法安全儲存金鑰');
+    }
+    $key = hash('sha256', PROVIDER_SECRET_KEY, true);
+    $iv = random_bytes(12);
+    $tag = '';
+    $cipher = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+    if ($cipher === false) {
+        throw new Exception('加密失敗');
+    }
+    // iv + tag + 密文，一起 base64 方便存進 TEXT 欄位
+    return base64_encode($iv . $tag . $cipher);
+}
+
+function provider_secret_decrypt($encoded) {
+    if (!provider_secret_key_ready() || $encoded === '' || $encoded === null) {
+        return null;
+    }
+    $raw = base64_decode($encoded, true);
+    if ($raw === false || strlen($raw) < 29) {
+        return null;
+    }
+    $key = hash('sha256', PROVIDER_SECRET_KEY, true);
+    $iv = substr($raw, 0, 12);
+    $tag = substr($raw, 12, 16);
+    $cipher = substr($raw, 28);
+    $plain = openssl_decrypt($cipher, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+    return $plain === false ? null : $plain;
+}
 
 /**
  * 取得所有已設定的上游。
@@ -30,7 +85,20 @@ function provider_all() {
         return $cache;
     }
 
-    // 新格式：config.php 裡定義 $PROVIDERS 陣列
+    /*
+     * 來源優先序：資料庫 → config.php 的 $PROVIDERS → 舊的 PAYUNI_* 常數。
+     *
+     * 資料庫優先是因為管理介面改的是那裡；但資料庫查不到（還沒建表、
+     * 連不上、或根本還沒設定過）時一定要能退回檔案設定 —— **不能因為
+     * 上游設定讀不到就讓所有交易停擺**。
+     */
+    $fromDb = provider_all_from_db();
+    if (!empty($fromDb)) {
+        $cache = $fromDb;
+        return $cache;
+    }
+
+    // config.php 裡定義 $PROVIDERS 陣列
     if (isset($GLOBALS['PROVIDERS']) && is_array($GLOBALS['PROVIDERS'])) {
         $cache = $GLOBALS['PROVIDERS'];
         return $cache;
@@ -62,6 +130,49 @@ function provider_all() {
         ),
     );
     return $cache;
+}
+
+/**
+ * 從資料庫讀出所有上游設定。
+ *
+ * 任何一步失敗都回空陣列讓呼叫端退回檔案設定 —— 這條路徑在每次交易時
+ * 都會經過，不能因為它出問題就中斷收款。
+ */
+function provider_all_from_db() {
+    try {
+        $conn = db_connect();
+        db_create_providers_table_if_not_exists($conn);
+        $rows = db_list_providers($conn);
+    } catch (Exception $e) {
+        error_log('讀取上游設定失敗，改用檔案設定：' . $e->getMessage());
+        return array();
+    }
+
+    $out = array();
+    foreach ($rows as $r) {
+        $credentials = array();
+        $decrypted = provider_secret_decrypt($r['credentials_enc']);
+        if ($decrypted !== null) {
+            $parsed = json_decode($decrypted, true);
+            if (is_array($parsed)) {
+                $credentials = $parsed;
+            }
+        } elseif (!empty($r['credentials_enc'])) {
+            // 有密文但解不開 —— 多半是 PROVIDER_SECRET_KEY 被換掉了。
+            // 這種情況要讓人看得到，不然只會得到「交易莫名失敗」。
+            error_log("上游 {$r['name']} 的金鑰無法解密，請確認 PROVIDER_SECRET_KEY 是否變更");
+        }
+        $endpoints = json_decode($r['endpoints'], true);
+        $out[$r['name']] = array(
+            'label' => $r['label'],
+            'driver' => $r['driver'],
+            'enabled' => (int) $r['enabled'] === 1,
+            'credentials' => $credentials,
+            'endpoints' => is_array($endpoints) ? $endpoints : array(),
+            'from_db' => true,
+        );
+    }
+    return $out;
 }
 
 /**

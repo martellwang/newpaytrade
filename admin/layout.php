@@ -7,6 +7,7 @@ function admin_header($title, $active = '') {
         'report.php' => '對帳報表',
         'devices.php' => '收銀機',
         'merchant.php' => '商店狀態',
+        'providers.php' => '上游管理',
         'apk.php' => '安裝檔',
     );
     ?><!DOCTYPE html>
@@ -26,7 +27,15 @@ header nav a { color:#e6dcff; text-decoration:none; margin-right:16px; font-size
 header nav a.on { color:#fff; font-weight:bold; border-bottom:2px solid #fff; padding-bottom:2px; }
 header .sp { margin-left:auto; }
 header .sp a { color:#e6dcff; font-size:14px; }
-main { padding:20px; max-width:1100px; margin:0 auto; }
+/*
+ * 用瀏覽器寬度的 95%。交易列表欄位多（時間／訂單編號／金額／狀態／
+ * 卡末四／授權碼／交易序號／訊息／明細鈕），原本固定 1100px 在寬螢幕上
+ * 會把右側的「明細」按鈕擠出可視範圍，得橫向捲動才點得到。
+ *
+ * 這個管理平台是給桌機用的（使用者明確表示不需為手機最佳化），所以沒有
+ * 特別處理小螢幕 —— 真的用手機開，.wrap 的 overflow-x 仍可橫向捲動。
+ */
+main { padding:20px; width:95%; margin:0 auto; }
 .card { background:#fff; border-radius:10px; padding:18px; margin-bottom:18px;
         box-shadow:0 1px 4px rgba(0,0,0,.06); }
 table { width:100%; border-collapse:collapse; font-size:14px; }
