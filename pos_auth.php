@@ -101,6 +101,7 @@ function pos_resolve_identity($posToken, $allowLegacy = false) {
         'staffName' => $staffId ? $session['staff_name'] : null,
         'staffCode' => $staffId ? $session['staff_code'] : null,
         'canRefund' => $staffId ? ((int) $session['can_refund'] === 1) : false,
+        'canEnroll' => $staffId ? ((int) $session['can_enroll'] === 1) : false,
         'shiftStartedAt' => $staffId ? $session['shift_started_at'] : null,
     );
 }

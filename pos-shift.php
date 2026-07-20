@@ -61,6 +61,7 @@ function current_shift($conn, $identity) {
         'staffName' => $identity['staffName'],
         'staffCode' => $identity['staffCode'],
         'canRefund' => $identity['canRefund'],
+        'canEnroll' => $identity['canEnroll'],
         'startedAt' => $identity['shiftStartedAt'],
         'count' => $summary['count'],
         'total' => $summary['total'],

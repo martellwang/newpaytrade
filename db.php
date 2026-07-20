@@ -1234,7 +1234,8 @@ function db_find_session_by_token($conn, $token) {
                 m.id AS merchant_id, m.name AS merchant_name, m.dealer_id,
                 m.enabled AS merchant_enabled,
                 st.mer_id, st.name AS store_name, st.provider, st.enabled AS store_enabled,
-                sf.name AS staff_name, sf.staff_code, sf.can_refund, sf.active AS staff_active
+                sf.name AS staff_name, sf.staff_code, sf.can_refund, sf.can_enroll,
+                sf.active AS staff_active
          FROM merchant_sessions s
          JOIN merchants m ON m.id = s.merchant_id
          LEFT JOIN merchant_stores st ON st.id = s.store_id
