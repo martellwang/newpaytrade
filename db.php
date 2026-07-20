@@ -137,6 +137,17 @@ function db_create_devices_table_if_not_exists($conn) {
          * 才加，之前的交易永遠不知道走哪家。預設 payuni 讓既有資料自動正確。
          */
         'provider' => "ALTER TABLE orders ADD COLUMN provider VARCHAR(32) NOT NULL DEFAULT 'payuni', ADD INDEX idx_provider (provider)",
+        /*
+         * 這筆交易屬於哪個客戶（商店）。
+         *
+         * mer_id 存的是「交易當下」的商店代號快照 —— 就算客戶資料之後被
+         * 修改或刪除，歷史交易仍查得到當時是用哪個商店代號送出的。
+         * 對帳、爭議處理、跟上游核對時都需要這個。
+         */
+        'merchant_id' => "ALTER TABLE orders ADD COLUMN merchant_id INT NULL, ADD INDEX idx_merchant (merchant_id)",
+        'mer_id' => "ALTER TABLE orders ADD COLUMN mer_id VARCHAR(32) NULL",
+        'store_id' => "ALTER TABLE orders ADD COLUMN store_id INT NULL, ADD INDEX idx_store (store_id)",
+        'dealer_id' => "ALTER TABLE orders ADD COLUMN dealer_id INT NULL, ADD INDEX idx_dealer (dealer_id)",
     );
     foreach ($orderCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM orders LIKE '$col'");
@@ -335,6 +346,543 @@ function db_save_merchant_status($conn, $merId, $payload) {
 }
 
 /**
+ * TMS 的四層歸屬：上游 → 經銷商 → 客戶 → 商店。
+ *
+ *   dealers          經銷商。有後台帳號，可看旗下全部。
+ *   merchants        客戶（公司或個人）。有後台帳號，也是收銀機的登入身分。
+ *   merchant_stores  商店。持有商店代號 MerID，沒有自己的登入帳號。
+ *
+ * === 登入為什麼要帶統編／身分證字號 ===
+ * 不同客戶很容易取到相同的帳號名稱（admin、pos、001…）。若帳號全域唯一，
+ * 先到先得會讓後來的客戶被迫改名，很難跟店家解釋。改成「統編 + 帳號」
+ * 的組合唯一，各客戶就能自由命名，彼此不干擾。
+ */
+function db_create_merchants_table_if_not_exists($conn) {
+    $sql = "
+        CREATE TABLE IF NOT EXISTS dealers (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            login_account VARCHAR(64) NOT NULL UNIQUE,
+            password_hash VARCHAR(255) NOT NULL,
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+            note VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 dealers 資料表失敗：' . mysqli_error($conn));
+    }
+
+    /*
+     * customer_code 是**系統配發的純數字客戶編號**，收銀機登入時輸入它。
+     *
+     * 為什麼不用統編／身分證字號當登入識別：
+     *   1. 身分證字號去掉開頭字母後**不保證唯一**。字母會參與檢查碼計算，
+     *      而有數組字母的貢獻值相同（A/M、C/I、K/L），所以
+     *      C123456789 與 I123456789 可以同時是兩個合法的字號 ——
+     *      只取後 9 碼就會撞號。
+     *   2. 身分證字號屬於敏感個資。拿它當登入識別代表它會進資料庫、log、
+     *      備份，店員輸入時旁邊的客人也看得到，外洩的影響遠超過「有人能
+     *      登入收銀機」。
+     *
+     * tax_id（統編／身分證字號）仍然保留 —— 開發票、對帳需要 —— 但只是
+     * 客戶資料的一個欄位，不參與登入。可留空。
+     *
+     * 唯一鍵是 (customer_code, login_account)：同一個客戶底下的帳號不重複，
+     * 但不同客戶可以自由取名，不會互相卡位。
+     */
+    $sql2 = "
+        CREATE TABLE IF NOT EXISTS merchants (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            dealer_id INT NULL,
+            customer_code VARCHAR(16) NOT NULL,
+            tax_id VARCHAR(32) NULL,
+            name VARCHAR(100) NOT NULL,
+            login_account VARCHAR(64) NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+            note VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_code (customer_code),
+            UNIQUE KEY uk_code_account (customer_code, login_account),
+            INDEX idx_dealer (dealer_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql2)) {
+        throw new Exception('建立 merchants 資料表失敗：' . mysqli_error($conn));
+    }
+
+    /*
+     * 商店。每個 MerID 各自屬於某一家上游 —— 同一個客戶完全可能一家分店
+     * 走 A 上游、另一家走 B 上游，所以 provider 記在這一層。
+     */
+    $sql3 = "
+        CREATE TABLE IF NOT EXISTS merchant_stores (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            merchant_id INT NOT NULL,
+            name VARCHAR(100) NOT NULL,
+            mer_id VARCHAR(32) NOT NULL,
+            provider VARCHAR(32) NOT NULL DEFAULT 'payuni',
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+            note VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_merchant (merchant_id),
+            INDEX idx_mer (mer_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql3)) {
+        throw new Exception('建立 merchant_stores 資料表失敗：' . mysqli_error($conn));
+    }
+
+    /*
+     * 收銀機登入憑證。
+     *
+     * 同一家店的多台收銀機共用同一組帳密是允許的 —— 各自登入拿到各自的
+     * token，撤銷與追蹤都是分開的。store_id 是「這台機器目前以哪家分店
+     * 營業」，登入後選擇並綁定。
+     *
+     * 資料庫只存 token 的雜湊，外洩時不該讓人拿了就能用。
+     */
+    $sql4 = "
+        CREATE TABLE IF NOT EXISTS merchant_sessions (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            merchant_id INT NOT NULL,
+            store_id INT NULL,
+            token_hash CHAR(64) NOT NULL UNIQUE,
+            device_id VARCHAR(64) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_used_at DATETIME NULL,
+            INDEX idx_merchant (merchant_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql4)) {
+        throw new Exception('建立 merchant_sessions 資料表失敗：' . mysqli_error($conn));
+    }
+}
+
+/**
+ * 收銀機登入失敗的鎖定狀態。
+ *
+ * === 為什麼鎖設備而不是鎖帳號 ===
+ * 鎖帳號的話，偷到一台收銀機的人只要連續試錯密碼，就能把整家店其他
+ * 收銀機一起鎖死 —— 那等於幫攻擊者做阻斷服務。鎖設備則只影響那一台，
+ * 店裡其他機器照常營業。
+ *
+ * merchant_id 記的是「最後一次嘗試登入的客戶」。這樣管理者在自己的後台
+ * 才看得到「我旗下有哪台設備被鎖住」—— 否則鎖定紀錄跟客戶對不起來，
+ * 店家只會看到一台鎖住卻找不到地方解。
+ *
+ * device_id 由 App 提供，理論上可以被改。但要改它得先反組譯並重打包
+ * App，那已經超出「撿到機器亂試密碼」的威脅範圍，不值得為此加更重的
+ * 綁定（例如憑證），那會讓正常換機變得很麻煩。
+ */
+function db_create_pos_locks_table_if_not_exists($conn) {
+    $sql = "
+        CREATE TABLE IF NOT EXISTS pos_device_locks (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            device_id VARCHAR(64) NOT NULL UNIQUE,
+            merchant_id INT NULL,
+            last_customer_code VARCHAR(16) NULL,
+            last_account VARCHAR(64) NULL,
+            failed_count INT NOT NULL DEFAULT 0,
+            locked TINYINT(1) NOT NULL DEFAULT 0,
+            last_failed_at DATETIME NULL,
+            locked_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_merchant (merchant_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 pos_device_locks 資料表失敗：' . mysqli_error($conn));
+    }
+}
+
+/** 連續失敗幾次就鎖住這台設備 */
+define('POS_LOCK_THRESHOLD', 5);
+
+function db_get_pos_lock($conn, $deviceId) {
+    if ($deviceId === null || $deviceId === '') {
+        return null;
+    }
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM pos_device_locks WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 's', $deviceId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+/**
+ * 記錄一次登入失敗。達到門檻就鎖住。
+ * @return array('locked' => bool, 'remaining' => 剩幾次機會)
+ */
+function db_record_pos_login_failure($conn, $deviceId, $merchantId, $customerCode, $account) {
+    if ($deviceId === null || $deviceId === '') {
+        // 沒有設備識別就無從鎖起。仍然回報，讓呼叫端知道沒有這層保護。
+        return array('locked' => false, 'remaining' => null);
+    }
+    $stmt = mysqli_prepare(
+        $conn,
+        'INSERT INTO pos_device_locks
+            (device_id, merchant_id, last_customer_code, last_account, failed_count, last_failed_at)
+         VALUES (?,?,?,?,1,NOW())
+         ON DUPLICATE KEY UPDATE
+            merchant_id = VALUES(merchant_id),
+            last_customer_code = VALUES(last_customer_code),
+            last_account = VALUES(last_account),
+            failed_count = failed_count + 1,
+            last_failed_at = NOW()'
+    );
+    mysqli_stmt_bind_param($stmt, 'siss', $deviceId, $merchantId, $customerCode, $account);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+
+    $row = db_get_pos_lock($conn, $deviceId);
+    $count = $row ? (int) $row['failed_count'] : 1;
+
+    if ($count >= POS_LOCK_THRESHOLD && (!$row || (int) $row['locked'] !== 1)) {
+        $lock = mysqli_prepare($conn,
+            'UPDATE pos_device_locks SET locked = 1, locked_at = NOW() WHERE device_id = ?');
+        mysqli_stmt_bind_param($lock, 's', $deviceId);
+        mysqli_stmt_execute($lock);
+        mysqli_stmt_close($lock);
+        return array('locked' => true, 'remaining' => 0);
+    }
+    return array(
+        'locked' => $row && (int) $row['locked'] === 1,
+        'remaining' => max(0, POS_LOCK_THRESHOLD - $count),
+    );
+}
+
+/** 登入成功就把失敗次數歸零 —— 累計的是「連續」失敗，不是歷史總數 */
+function db_reset_pos_login_failures($conn, $deviceId) {
+    if ($deviceId === null || $deviceId === '') {
+        return;
+    }
+    $stmt = mysqli_prepare($conn,
+        'UPDATE pos_device_locks SET failed_count = 0 WHERE device_id = ? AND locked = 0');
+    mysqli_stmt_bind_param($stmt, 's', $deviceId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/** 管理者解鎖 */
+function db_unlock_pos_device($conn, $deviceId) {
+    $stmt = mysqli_prepare($conn,
+        'UPDATE pos_device_locks SET locked = 0, failed_count = 0, locked_at = NULL WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 's', $deviceId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/**
+ * 某個客戶旗下的收銀機清單（含鎖定狀態）。
+ *
+ * 來源有兩個並集：曾經登入過的（merchant_sessions）與曾經嘗試登入的
+ *（pos_device_locks）—— 只看前者的話，一台從沒成功登入過就被鎖住的
+ * 機器不會出現在清單裡，管理者就找不到地方解鎖。
+ */
+function db_list_pos_devices_by_merchant($conn, $merchantId) {
+    $sql = '
+        SELECT d.device_id,
+               MAX(d.locked) AS locked,
+               MAX(d.failed_count) AS failed_count,
+               MAX(d.last_failed_at) AS last_failed_at,
+               MAX(d.locked_at) AS locked_at,
+               MAX(s.last_used_at) AS last_used_at,
+               dev.brand, dev.model, dev.name, dev.serial_no
+        FROM pos_device_locks d
+        LEFT JOIN merchant_sessions s ON s.device_id = d.device_id AND s.merchant_id = ?
+        LEFT JOIN devices dev ON dev.device_id = d.device_id
+        WHERE d.merchant_id = ?
+        GROUP BY d.device_id, dev.brand, dev.model, dev.name, dev.serial_no
+
+        UNION
+
+        SELECT s.device_id,
+               0 AS locked, 0 AS failed_count, NULL AS last_failed_at, NULL AS locked_at,
+               MAX(s.last_used_at) AS last_used_at,
+               dev.brand, dev.model, dev.name, dev.serial_no
+        FROM merchant_sessions s
+        LEFT JOIN devices dev ON dev.device_id = s.device_id
+        WHERE s.merchant_id = ?
+          AND s.device_id IS NOT NULL
+          AND s.device_id NOT IN (SELECT device_id FROM pos_device_locks WHERE merchant_id = ?)
+        GROUP BY s.device_id, dev.brand, dev.model, dev.name, dev.serial_no
+    ';
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, 'iiii', $merchantId, $merchantId, $merchantId, $merchantId);
+    mysqli_stmt_execute($stmt);
+    $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+// ── 經銷商 ──────────────────────────────────────────────────────
+
+function db_list_dealers($conn) {
+    $res = mysqli_query($conn, 'SELECT * FROM dealers ORDER BY id DESC');
+    return $res ? mysqli_fetch_all($res, MYSQLI_ASSOC) : array();
+}
+
+function db_find_dealer($conn, $id) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM dealers WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+function db_find_dealer_by_account($conn, $account) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM dealers WHERE login_account = ?');
+    mysqli_stmt_bind_param($stmt, 's', $account);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+/** @param string|null $passwordHash null = 不變更密碼 */
+function db_save_dealer($conn, $id, $name, $account, $passwordHash, $enabled, $note) {
+    if ($id) {
+        if ($passwordHash === null) {
+            $stmt = mysqli_prepare($conn,
+                'UPDATE dealers SET name=?, login_account=?, enabled=?, note=? WHERE id=?');
+            mysqli_stmt_bind_param($stmt, 'ssisi', $name, $account, $enabled, $note, $id);
+        } else {
+            $stmt = mysqli_prepare($conn,
+                'UPDATE dealers SET name=?, login_account=?, password_hash=?, enabled=?, note=? WHERE id=?');
+            mysqli_stmt_bind_param($stmt, 'sssisi', $name, $account, $passwordHash, $enabled, $note, $id);
+        }
+    } else {
+        $stmt = mysqli_prepare($conn,
+            'INSERT INTO dealers (name, login_account, password_hash, enabled, note) VALUES (?,?,?,?,?)');
+        mysqli_stmt_bind_param($stmt, 'sssis', $name, $account, $passwordHash, $enabled, $note);
+    }
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存經銷商失敗：' . mysqli_stmt_error($stmt));
+    }
+    $newId = $id ?: mysqli_insert_id($conn);
+    mysqli_stmt_close($stmt);
+    return $newId;
+}
+
+function db_count_merchants_by_dealer($conn, $dealerId) {
+    $stmt = mysqli_prepare($conn, 'SELECT COUNT(*) c FROM merchants WHERE dealer_id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $dealerId);
+    mysqli_stmt_execute($stmt);
+    $c = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
+    mysqli_stmt_close($stmt);
+    return $c;
+}
+
+// ── 客戶 ────────────────────────────────────────────────────────
+
+function db_list_merchants($conn, $dealerId = null) {
+    if ($dealerId === null) {
+        $res = mysqli_query($conn, 'SELECT * FROM merchants ORDER BY id DESC');
+        return $res ? mysqli_fetch_all($res, MYSQLI_ASSOC) : array();
+    }
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM merchants WHERE dealer_id = ? ORDER BY id DESC');
+    mysqli_stmt_bind_param($stmt, 'i', $dealerId);
+    mysqli_stmt_execute($stmt);
+    $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+function db_find_merchant($conn, $id) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM merchants WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+/** 收銀機登入用：客戶編號 + 帳號 才能定位到唯一一個客戶 */
+function db_find_merchant_by_login($conn, $customerCode, $account) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM merchants WHERE customer_code = ? AND login_account = ?');
+    mysqli_stmt_bind_param($stmt, 'ss', $customerCode, $account);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+/** @param string|null $passwordHash null = 不變更密碼 */
+function db_save_merchant($conn, $id, $dealerId, $customerCode, $taxId, $name, $account, $passwordHash, $enabled, $note) {
+    if ($id) {
+        // customer_code 建立後不可修改 —— 店家已經把它記在收銀機旁邊了，
+        // 改掉等於讓所有分店突然登不進去
+        if ($passwordHash === null) {
+            $stmt = mysqli_prepare($conn,
+                'UPDATE merchants SET dealer_id=?, tax_id=?, name=?, login_account=?, enabled=?, note=? WHERE id=?');
+            mysqli_stmt_bind_param($stmt, 'isssisi', $dealerId, $taxId, $name, $account, $enabled, $note, $id);
+        } else {
+            $stmt = mysqli_prepare($conn,
+                'UPDATE merchants SET dealer_id=?, tax_id=?, name=?, login_account=?, password_hash=?, enabled=?, note=? WHERE id=?');
+            mysqli_stmt_bind_param($stmt, 'issssisi', $dealerId, $taxId, $name, $account, $passwordHash, $enabled, $note, $id);
+        }
+    } else {
+        $stmt = mysqli_prepare($conn,
+            'INSERT INTO merchants (dealer_id, customer_code, tax_id, name, login_account, password_hash, enabled, note)
+             VALUES (?,?,?,?,?,?,?,?)');
+        mysqli_stmt_bind_param($stmt, 'isssssis', $dealerId, $customerCode, $taxId, $name, $account, $passwordHash, $enabled, $note);
+    }
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存客戶失敗：' . mysqli_stmt_error($stmt));
+    }
+    $newId = $id ?: mysqli_insert_id($conn);
+    mysqli_stmt_close($stmt);
+    return $newId;
+}
+
+/**
+ * 配發下一個客戶編號。
+ *
+ * 從 100001 開始遞增。用六位數而不是接續資料庫的 id：
+ *   - id 從 1 開始，「客戶 3 號」看起來像測試資料，不夠正式
+ *   - 固定長度讓店員比較不會少打一位
+ *
+ * 併發時兩個請求可能拿到同一個號碼，但 customer_code 有 UNIQUE 限制，
+ * 後寫入的那筆會失敗並顯示錯誤 —— 管理者重按一次即可。這個情境極少發生
+ * （只在新增客戶時），不值得為它加鎖。
+ */
+function db_next_customer_code($conn) {
+    $res = mysqli_query($conn, 'SELECT MAX(CAST(customer_code AS UNSIGNED)) AS m FROM merchants');
+    $max = $res ? (int) mysqli_fetch_assoc($res)['m'] : 0;
+    return (string) max(100001, $max + 1);
+}
+
+// ── 商店 ────────────────────────────────────────────────────────
+
+function db_list_stores($conn, $merchantId) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM merchant_stores WHERE merchant_id = ? ORDER BY id');
+    mysqli_stmt_bind_param($stmt, 'i', $merchantId);
+    mysqli_stmt_execute($stmt);
+    $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+function db_find_store($conn, $id) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM merchant_stores WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+function db_save_store($conn, $id, $merchantId, $name, $merId, $provider, $enabled, $note) {
+    if ($id) {
+        $stmt = mysqli_prepare($conn,
+            'UPDATE merchant_stores SET name=?, mer_id=?, provider=?, enabled=?, note=? WHERE id=? AND merchant_id=?');
+        mysqli_stmt_bind_param($stmt, 'sssisii', $name, $merId, $provider, $enabled, $note, $id, $merchantId);
+    } else {
+        $stmt = mysqli_prepare($conn,
+            'INSERT INTO merchant_stores (merchant_id, name, mer_id, provider, enabled, note) VALUES (?,?,?,?,?,?)');
+        mysqli_stmt_bind_param($stmt, 'isssis', $merchantId, $name, $merId, $provider, $enabled, $note);
+    }
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存商店失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 這家商店被幾筆交易用過。有交易就不該刪 —— 歷史會失去歸屬。 */
+function db_count_orders_by_store($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT COUNT(*) c FROM orders WHERE store_id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $c = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
+    mysqli_stmt_close($stmt);
+    return $c;
+}
+
+function db_delete_store($conn, $id, $merchantId) {
+    $stmt = mysqli_prepare($conn, 'DELETE FROM merchant_stores WHERE id = ? AND merchant_id = ?');
+    mysqli_stmt_bind_param($stmt, 'ii', $id, $merchantId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+// ── 收銀機登入 ──────────────────────────────────────────────────
+
+/** 建立登入 token。回傳明文 token（只有這一次拿得到）。 */
+function db_create_merchant_session($conn, $merchantId, $storeId, $deviceId) {
+    $token = bin2hex(random_bytes(32));
+    $hash = hash('sha256', $token);
+    $stmt = mysqli_prepare($conn,
+        'INSERT INTO merchant_sessions (merchant_id, store_id, token_hash, device_id, last_used_at)
+         VALUES (?,?,?,?,NOW())');
+    mysqli_stmt_bind_param($stmt, 'iiss', $merchantId, $storeId, $hash, $deviceId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+    return $token;
+}
+
+/** 綁定這個 token 以哪家分店營業 */
+function db_bind_session_store($conn, $token, $storeId) {
+    $hash = hash('sha256', $token);
+    $stmt = mysqli_prepare($conn, 'UPDATE merchant_sessions SET store_id = ? WHERE token_hash = ?');
+    mysqli_stmt_bind_param($stmt, 'is', $storeId, $hash);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/**
+ * 用 token 找出登入身分。
+ * 客戶或商店任一被停用就視同失效 —— 停用了還能繼續收款是不可接受的。
+ */
+function db_find_session_by_token($conn, $token) {
+    if ($token === '' || $token === null) {
+        return null;
+    }
+    $hash = hash('sha256', $token);
+    $stmt = mysqli_prepare($conn,
+        'SELECT s.id AS session_id, s.store_id,
+                m.id AS merchant_id, m.name AS merchant_name, m.dealer_id,
+                m.enabled AS merchant_enabled,
+                st.mer_id, st.name AS store_name, st.provider, st.enabled AS store_enabled
+         FROM merchant_sessions s
+         JOIN merchants m ON m.id = s.merchant_id
+         LEFT JOIN merchant_stores st ON st.id = s.store_id
+         WHERE s.token_hash = ?');
+    mysqli_stmt_bind_param($stmt, 's', $hash);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+
+    if (!$row || (int) $row['merchant_enabled'] !== 1) {
+        return null;
+    }
+    if ($row['store_id'] !== null && (int) $row['store_enabled'] !== 1) {
+        return null;
+    }
+
+    $upd = mysqli_prepare($conn, 'UPDATE merchant_sessions SET last_used_at = NOW() WHERE token_hash = ?');
+    mysqli_stmt_bind_param($upd, 's', $hash);
+    mysqli_stmt_execute($upd);
+    mysqli_stmt_close($upd);
+    return $row;
+}
+
+/** 撤銷某客戶的所有登入。停用、改密碼、商店異動時要呼叫。 */
+function db_revoke_merchant_sessions($conn, $merchantId) {
+    $stmt = mysqli_prepare($conn, 'DELETE FROM merchant_sessions WHERE merchant_id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $merchantId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/**
  * 上游金流機構的設定。
  *
  * credentials_enc 是加密後的 JSON（見 providers.php 的 provider_secret_*）。
@@ -423,12 +971,18 @@ function db_delete_provider($conn, $name) {
     mysqli_stmt_close($stmt);
 }
 
-function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null, $cardInst = 1) {
-    $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial, card_inst) VALUES (?, ?, ?, ?, ?, ?)');
+function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null,
+                                 $cardInst = 1, $merchantId = null, $merId = null,
+                                 $storeId = null, $dealerId = null) {
+    $stmt = mysqli_prepare($conn,
+        'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial,
+                             card_inst, merchant_id, mer_id, store_id, dealer_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?)');
     $status = 'pending';
-    // 注意型別字串：card_inst 是 i，接在三個 s 後面。之前 appVersion 就因為
-    // 型別對錯位置，把 "0.1-dev" 靜默轉成 0。
-    mysqli_stmt_bind_param($stmt, 'sisssi', $merTradeNo, $amount, $status, $deviceId, $deviceSerial, $cardInst);
+    // 型別字串要跟欄位順序一一對應：整數欄位是 i，其餘 s。
+    // 之前 appVersion 就因為型別對錯位置，把 "0.1-dev" 靜默轉成 0。
+    mysqli_stmt_bind_param($stmt, 'sisssiisii', $merTradeNo, $amount, $status, $deviceId, $deviceSerial,
+        $cardInst, $merchantId, $merId, $storeId, $dealerId);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('寫入訂單紀錄失敗：' . mysqli_stmt_error($stmt));
     }

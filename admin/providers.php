@@ -25,12 +25,20 @@ $flash = null;
 $flashOk = false;
 
 /** 各驅動需要哪些憑證欄位。新增驅動時在這裡補一筆。 */
+/*
+ * ⚠️ 這裡只放**上游層級**的憑證，不要放商店代號（MerID）。
+ *
+ * MerID 是「客戶」的東西 —— 每個客戶各自有自己的商店代號，同一家上游
+ * 底下會有很多客戶。把 MerID 放在上游設定裡，等於假設一家上游只服務
+ * 一個商店，那在 TMS 情境下是錯的。
+ *
+ * 客戶與其 MerID 在「客戶管理」頁維護。
+ */
 $driverFields = array(
     'payuni' => array(
-        'mer_id' => '商店代號 MerID',
-        'hash_key' => 'Hash Key（32 碼）',
-        'hash_iv' => 'Hash IV（16 碼）',
-        'agent_id' => '代理商代號 AgentID（4 碼大寫，查詢商店狀態用）',
+        'hash_key' => 'Hash Key（32 碼，代理商層級）',
+        'hash_iv' => 'Hash IV（16 碼，代理商層級）',
+        'agent_id' => '代理商代號 AgentID（4 碼大寫）',
     ),
 );
 $driverEndpoints = array(
