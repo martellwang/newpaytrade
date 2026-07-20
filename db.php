@@ -514,6 +514,94 @@ function db_create_pos_locks_table_if_not_exists($conn) {
     }
 }
 
+// ── 掃碼付款中轉頁 ──────────────────────────────────────────────
+
+/**
+ * 建立 payment_links 資料表：收銀機顯示的 QR 指向這裡的一筆紀錄。
+ *
+ * 為什麼要有這張表，而不是把訂單編號直接放進 QR：
+ *
+ *   1. **QR 是公開的** —— 貼在櫃檯上任何人都能拍。訂單編號可以推測
+ *      （POS+時間戳），拿別人的編號去開頁面就能看到金額與店名。
+ *      用隨機 token 讓網址不可推測。
+ *   2. 金額只能來自這張表，不能來自網址參數。放在網址上等於讓客人
+ *      自己決定要付多少。
+ *   3. 有效期限要在伺服器強制，不能只靠畫面倒數。
+ */
+function db_create_payment_links_table_if_not_exists($conn) {
+    $sql = "
+        CREATE TABLE IF NOT EXISTS payment_links (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            token CHAR(32) NOT NULL UNIQUE,
+            mer_trade_no VARCHAR(25) NOT NULL,
+            merchant_id INT NULL,
+            store_id INT NULL,
+            mer_id VARCHAR(32) NULL,
+            amount INT NOT NULL,
+            store_name VARCHAR(100) NULL,
+            method VARCHAR(16) NULL,
+            expires_at DATETIME NOT NULL,
+            opened_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_mer_trade_no (mer_trade_no),
+            INDEX idx_expires (expires_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 payment_links 資料表失敗：' . mysqli_error($conn));
+    }
+}
+
+/** 掃碼付款頁的有效時間（秒）。客人拿出手機、掃碼、選錢包、認證，5 分鐘夠用。 */
+define('PAYMENT_LINK_TTL', 300);
+
+/**
+ * 建立一筆付款連結，回傳 token。
+ *
+ * token 用 random_bytes 而不是 uniqid()/mt_rand() —— 那些是可預測的，
+ * 猜得到就能看到別家店的交易金額。
+ */
+function db_create_payment_link($conn, $merTradeNo, $amount, $merchantId, $storeId, $merId, $storeName) {
+    $token = bin2hex(random_bytes(16));
+    $stmt = mysqli_prepare($conn,
+        'INSERT INTO payment_links
+            (token, mer_trade_no, merchant_id, store_id, mer_id, amount, store_name, expires_at)
+         VALUES (?,?,?,?,?,?,?, DATE_ADD(NOW(), INTERVAL ? SECOND))');
+    $ttl = PAYMENT_LINK_TTL;
+    mysqli_stmt_bind_param($stmt, 'ssiisisi', $token, $merTradeNo, $merchantId, $storeId,
+        $merId, $amount, $storeName, $ttl);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('建立付款連結失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+    return $token;
+}
+
+/** 取出付款連結。已過期回 null —— 由資料庫判斷時間，不信任呼叫端。 */
+function db_find_payment_link($conn, $token) {
+    if (!preg_match('/^[a-f0-9]{32}$/', $token)) {
+        return null;
+    }
+    $stmt = mysqli_prepare($conn,
+        'SELECT * FROM payment_links WHERE token = ? AND expires_at > NOW()');
+    mysqli_stmt_bind_param($stmt, 's', $token);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
+}
+
+/** 記錄客人選了哪種錢包，以及第一次開啟的時間（用來看有多少客人掃了卻沒付完）*/
+function db_mark_payment_link_opened($conn, $token, $method = null) {
+    $stmt = mysqli_prepare($conn,
+        'UPDATE payment_links
+            SET opened_at = COALESCE(opened_at, NOW()), method = COALESCE(?, method)
+          WHERE token = ?');
+    mysqli_stmt_bind_param($stmt, 'ss', $method, $token);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
 /** 連續失敗幾次就鎖住這台設備 */
 define('POS_LOCK_THRESHOLD', 5);
 

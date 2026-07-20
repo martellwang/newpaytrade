@@ -7,7 +7,7 @@
  *
  *   1. 回傳的 QRToken 是**網址**，不是圖。收銀機自己把它編成 QR 顯示。
  *   2. 這支成功**不代表收到錢**，只代表 QR 建好了（TradeStatus=0 建立）。
- *      真正的結果要靠 linepay-status.php 查詢或 notify-linepay.php 通知。
+ *      真正的結果要靠 linepay-status.php 查詢或 notify-scan.php 通知。
  *   3. Version 固定 1.2（信用卡 1.3、查詢 2.0、請退款 1.0，每支都不同）。
  */
 
@@ -112,7 +112,7 @@ $encryptInfoParams = array(
      *    本機 XAMPP 收不到通知，只能靠 linepay-status.php 主動查詢。
      *    這正是收銀機以查詢為主、通知為輔的原因。
      */
-    'NotifyURL' => PUBLIC_BASE_URL . '/notify-linepay.php',
+    'NotifyURL' => PUBLIC_BASE_URL . '/notify-scan.php',
 );
 
 try {

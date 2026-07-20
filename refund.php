@@ -105,7 +105,18 @@ if (!$order) {
  * 明確拒絕遠比「試試看會怎樣」安全。
  */
 $paymentMethod = isset($order['payment_method']) ? $order['payment_method'] : 'credit';
-if ($paymentMethod !== 'credit') {
+/*
+ * wallet（Apple / Google / Samsung Pay）**要走這條信用卡的路**。
+ *
+ * 那三種在 PAYUNi 底層就是信用卡交易（PaymentType=1，只是用 AuthType
+ * 4/5/6 區分是哪個錢包），一樣有「先授權後請款」，所以請退款與取消授權
+ * 的邏輯完全適用。
+ *
+ * 分開記在 payment_method 是為了對帳時看得出來錢從哪個管道進來，
+ * 不是因為結算方式不同。把它一併擋掉的話，錢包收的款會退不了。
+ */
+$creditLike = array('credit', 'wallet');
+if (!in_array($paymentMethod, $creditLike, true)) {
     respond(400, array(
         'status' => 'failed',
         'message' => '這筆是 ' . $paymentMethod . ' 交易，請改用對應的退款端點（LINE Pay 請用 linepay-refund.php）',
