@@ -184,6 +184,69 @@ $noStaff = null;
 foreach ($r['orders'] as $o) { if ($o['merTradeNo'] === $merTradeNo2) { $noStaff = $o; } }
 check('該筆經手人為空', $noStaff !== null && empty($noStaff['staffName']));
 
+echo "\n=== 11. 感應卡開班 ===\n";
+// 給店長綁一張卡（PIN 留空代表不修改）
+db_save_staff($conn, $mgrId, $storeId, '01', '有權限店長', '', 1, 1, 'test', '717E6632', 1);
+
+call('POST', "$base/pos-shift.php?action=end", $auth);
+list($code, $r) = call('POST', "$base/pos-shift.php?action=start", $auth,
+    array('cardUid' => '717E6632', 'pin' => '1234'));
+check('刷卡 + 正確 PIN 可開班', isset($r['onShift']) && $r['onShift'] === true,
+    json_encode($r, JSON_UNESCAPED_UNICODE));
+check('身分正確', isset($r['staffName']) && $r['staffName'] === '有權限店長');
+
+call('POST', "$base/pos-shift.php?action=end", $auth);
+list($code, $r) = call('POST', "$base/pos-shift.php?action=start", $auth,
+    array('cardUid' => '717E6632', 'pin' => '0000'));
+check('刷卡但 PIN 錯要被擋', isset($r['status']) && $r['status'] === 'failed');
+check('訊息指向卡片而非工號',
+    isset($r['message']) && strpos($r['message'], '卡片或 PIN') !== false,
+    isset($r['message']) ? $r['message'] : '');
+
+list($code, $r) = call('POST', "$base/pos-shift.php?action=start", $auth,
+    array('cardUid' => 'DEADBEEF', 'pin' => '1234'));
+check('沒登記過的卡被擋', isset($r['status']) && $r['status'] === 'failed');
+
+list($code, $r) = call('POST', "$base/pos-shift.php?action=start", $auth,
+    array('cardUid' => 'ZZZZ', 'pin' => '1234'));
+check('格式不對的 UID 被擋', $code === 400, "code=$code");
+
+call('POST', "$base/pos-shift.php?action=end", $auth);
+list($code, $r) = call('POST', "$base/pos-shift.php?action=start", $auth,
+    array('staffCode' => '02', 'pin' => '5678'));
+check('原本的工號方式仍然可用', isset($r['onShift']) && $r['onShift'] === true,
+    json_encode($r, JSON_UNESCAPED_UNICODE));
+
+echo "\n=== 12. 收銀機建檔 ===\n";
+// 目前開班的是「一般店員」，沒有建檔權限
+list($code, $r) = call('POST', "$base/pos-shift.php?action=enroll", $auth,
+    array('cardUid' => 'AABBCCDD', 'name' => '新人', 'pin' => '2468'));
+check('沒有建檔權限者被擋', $code === 403 && isset($r['noPermission']),
+    "code=$code " . json_encode($r, JSON_UNESCAPED_UNICODE));
+
+// 換成有建檔權限的店長
+call('POST', "$base/pos-shift.php?action=end", $auth);
+call('POST', "$base/pos-shift.php?action=start", $auth,
+    array('cardUid' => '717E6632', 'pin' => '1234'));
+list($code, $r) = call('POST', "$base/pos-shift.php?action=enroll", $auth,
+    array('cardUid' => 'AABBCCDD', 'name' => '新人', 'pin' => '2468'));
+check('有建檔權限者可以登記新卡', isset($r['status']) && $r['status'] === 'success',
+    json_encode($r, JSON_UNESCAPED_UNICODE));
+check('自動編出工號', !empty($r['staffCode']));
+
+list($code, $r) = call('POST', "$base/pos-shift.php?action=enroll", $auth,
+    array('cardUid' => 'AABBCCDD', 'name' => '另一人', 'pin' => '1357'));
+check('同一張卡不能登記給兩個人',
+    isset($r['message']) && strpos($r['message'], '已經登記給') !== false,
+    isset($r['message']) ? $r['message'] : '');
+
+call('POST', "$base/pos-shift.php?action=end", $auth);
+list($code, $r) = call('POST', "$base/pos-shift.php?action=start", $auth,
+    array('cardUid' => 'AABBCCDD', 'pin' => '2468'));
+check('新登記的卡可以開班', isset($r['staffName']) && $r['staffName'] === '新人',
+    json_encode($r, JSON_UNESCAPED_UNICODE));
+call('POST', "$base/pos-shift.php?action=end", $auth);
+
 echo "\n=== 清除測試資料 ===\n";
 mysqli_query($conn, "DELETE FROM orders WHERE store_id = $storeId");
 mysqli_query($conn, "DELETE FROM refunds WHERE mer_trade_no LIKE 'TEST$suffix%'");

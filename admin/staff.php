@@ -46,6 +46,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $name = trim(isset($_POST['name']) ? $_POST['name'] : '');
             $pin = trim(isset($_POST['pin']) ? $_POST['pin'] : '');
             $canRefund = isset($_POST['can_refund']) ? 1 : 0;
+            $canEnroll = isset($_POST['can_enroll']) ? 1 : 0;
+            $cardUid = strtoupper(trim(isset($_POST['card_uid']) ? $_POST['card_uid'] : ''));
             $active = isset($_POST['active']) ? 1 : 0;
             $note = trim(isset($_POST['note']) ? $_POST['note'] : '');
 
@@ -60,7 +62,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new Exception('PIN 必須是 4 到 8 位數字');
             }
 
-            db_save_staff($conn, $id, $storeId, $code, $name, $pin, $canRefund, $active, $note);
+            if ($cardUid !== '' && !preg_match('/^[0-9A-F]{8,32}$/', $cardUid)) {
+                throw new Exception('卡片 UID 只能是 8-32 個 16 進位字元');
+            }
+            db_save_staff($conn, $id, $storeId, $code, $name, $pin, $canRefund, $active, $note,
+                $cardUid, $canEnroll);
             $flash = "已儲存店員「{$name}」";
 
         } elseif ($action === 'delete_staff') {
@@ -105,7 +111,10 @@ admin_header('店員管理');
   </div>
   <div class="muted" style="margin-top:8px">
     店員是疊在收銀機登入之上的一層。收銀機仍用商店帳號登入（一綁很久），
-    店員在開班時輸入工號與 PIN，用來記錄「這一班誰收了多少」與誰有退款權限。
+    店員開班時可以用<strong>工號 + PIN</strong>或<strong>感應卡 + PIN</strong>，兩種併行。
+    用來記錄「這一班誰收了多少」與誰有退款權限。<br>
+    ⚠️ 感應卡的 UID 不是密碼（任何手機都讀得到，也能複製），所以刷卡之後
+    <strong>一定還要輸入 PIN</strong> —— 卡片只是加快輸入，不是替代驗證。
   </div>
 </div>
 
@@ -114,17 +123,22 @@ admin_header('店員管理');
 
 <div class="card">
   <table style="width:100%;border-collapse:collapse">
-    <thead><tr><th>工號</th><th>姓名</th><th>可退款</th><th>狀態</th><th>備註</th><th></th></tr></thead>
+    <thead><tr><th>工號</th><th>姓名</th><th>感應卡</th><th>可退款</th><th>可建檔</th>
+        <th>狀態</th><th>備註</th><th></th></tr></thead>
     <tbody>
       <?php if (!$staff): ?>
-        <tr><td colspan="6" class="muted">尚未建立店員。沒有店員的話收銀機仍可收款，
+        <tr><td colspan="8" class="muted">尚未建立店員。沒有店員的話收銀機仍可收款，
             只是交易查不到經手人，也無法交班。</td></tr>
       <?php endif; ?>
       <?php foreach ($staff as $s): ?>
       <tr style="border-top:1px solid #eee">
         <td><?= h($s['staff_code']) ?></td>
         <td><?= h($s['name']) ?></td>
+        <td><?= !empty($s['card_uid'])
+              ? '<code>' . h($s['card_uid']) . '</code>'
+              : '<span class="muted">—</span>' ?></td>
         <td><?= ((int) $s['can_refund'] === 1) ? '是' : '—' ?></td>
+        <td><?= (isset($s['can_enroll']) && (int) $s['can_enroll'] === 1) ? '是' : '—' ?></td>
         <td><?= ((int) $s['active'] === 1) ? '啟用' : '<span class="muted">停用</span>' ?></td>
         <td class="muted"><?= h($s['note']) ?></td>
         <td><a class="btn2" href="?store=<?= $storeId ?>&amp;edit=<?= (int) $s['id'] ?>">編輯</a></td>
@@ -158,6 +172,14 @@ admin_header('店員管理');
           <?= $editRow ? '留空代表不修改' : '店員開班時輸入' ?>
         </span>
       </label>
+      <label>感應卡 UID<br>
+        <input type="text" name="card_uid" style="width:100%;padding:8px"
+               value="<?= h($editRow && isset($editRow['card_uid']) ? $editRow['card_uid'] : '') ?>">
+        <span class="muted" style="font-size:12px">
+          16 進位，例如 717E6632。留空代表這位店員只用工號開班。
+          <strong>清空即可解除綁定</strong>（卡片遺失時用）。
+        </span>
+      </label>
       <label>備註<br>
         <input type="text" name="note" style="width:100%;padding:8px"
                value="<?= h($editRow ? $editRow['note'] : '') ?>">
@@ -170,6 +192,16 @@ admin_header('店員管理');
     </label>
     <div class="muted" style="font-size:12px;margin-bottom:12px">
       ⚠️ 退款會把錢退還給客人，且無法在收銀機上撤回。建議只開給店長或值班主管。
+    </div>
+
+    <label style="display:block;margin:0 0 6px">
+      <input type="checkbox" name="can_enroll" value="1"
+             <?= ($editRow && isset($editRow['can_enroll']) && (int) $editRow['can_enroll'] === 1)
+                 ? 'checked' : '' ?>> 可以在收銀機上登記新的感應卡
+    </label>
+    <div class="muted" style="font-size:12px;margin-bottom:12px">
+      有這個權限的人刷卡開班之後，就能在收銀機上把新卡登記給其他店員，
+      不必回到這個後台。等於可以新增人員，請謹慎給予。
     </div>
 
     <label style="display:block;margin:0 0 14px">

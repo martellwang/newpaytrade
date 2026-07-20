@@ -624,7 +624,12 @@ function db_create_store_staff_table_if_not_exists($conn) {
             staff_code VARCHAR(16) NOT NULL,
             name VARCHAR(64) NOT NULL,
             pin_hash VARCHAR(255) NOT NULL,
+            -- 感應卡的 UID（16 進位字串）。可為 NULL —— 只用工號開班的店員
+            -- 不需要卡片，兩種方式併行。
+            card_uid VARCHAR(32) NULL,
             can_refund TINYINT(1) NOT NULL DEFAULT 0,
+            -- 可以在收銀機上把新卡登記給其他店員
+            can_enroll TINYINT(1) NOT NULL DEFAULT 0,
             active TINYINT(1) NOT NULL DEFAULT 1,
             note VARCHAR(255) NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -632,12 +637,70 @@ function db_create_store_staff_table_if_not_exists($conn) {
             -- 工號只要在同一家店裡唯一就好。不同店的店員可以都叫 01，
             -- 強制全系統唯一只會讓店家沒辦法用自己習慣的編號。
             UNIQUE KEY uniq_store_code (store_id, staff_code),
+            -- 一張卡在同一家店只能對應一個人。跨店不限制 —— 同一個人可能
+            -- 在同集團的不同分店輪班，用同一張卡是合理的。
+            UNIQUE KEY uniq_store_card (store_id, card_uid),
             INDEX idx_store (store_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ";
     if (!mysqli_query($conn, $sql)) {
         throw new Exception('建立 store_staff 資料表失敗：' . mysqli_error($conn));
     }
+
+    // 既有資料表要補欄位（正式機走的是這條路，不是上面的建表）
+    $cols = array(
+        'card_uid' => "ALTER TABLE store_staff ADD COLUMN card_uid VARCHAR(32) NULL,
+                       ADD UNIQUE KEY uniq_store_card (store_id, card_uid)",
+        'can_enroll' => "ALTER TABLE store_staff ADD COLUMN can_enroll TINYINT(1) NOT NULL DEFAULT 0",
+    );
+    foreach ($cols as $col => $ddl) {
+        $res = mysqli_query($conn, "SHOW COLUMNS FROM store_staff LIKE '$col'");
+        if ($res && mysqli_num_rows($res) === 0) {
+            if (!mysqli_query($conn, $ddl)) {
+                throw new Exception("store_staff 新增 $col 欄位失敗：" . mysqli_error($conn));
+            }
+        }
+    }
+}
+
+/**
+ * 依感應卡 UID 找店員（刷卡開班用）。只找啟用中的。
+ *
+ * ⚠️ **UID 不是密碼。** 任何手機都讀得到，空白卡也能改成別人的 UID。
+ * 所以查到人之後**一定還要驗 PIN** —— 卡片只是「你有什麼」，
+ * PIN 才是真正擋人的那一層。
+ */
+function db_find_staff_by_card($conn, $storeId, $cardUid) {
+    if ($cardUid === '' || $cardUid === null) {
+        return null;
+    }
+    $stmt = mysqli_prepare($conn,
+        'SELECT * FROM store_staff WHERE store_id = ? AND card_uid = ? AND active = 1');
+    mysqli_stmt_bind_param($stmt, 'is', $storeId, $cardUid);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
+}
+
+/** 把一張卡綁到某位店員身上（收銀機建檔用）*/
+function db_set_staff_card($conn, $staffId, $cardUid) {
+    $stmt = mysqli_prepare($conn, 'UPDATE store_staff SET card_uid = ? WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'si', $cardUid, $staffId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('綁定卡片失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 這家店有幾位店員 —— 用來判斷是不是「第一張卡」的啟用情境 */
+function db_count_staff($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT COUNT(*) c FROM store_staff WHERE store_id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $c = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
+    mysqli_stmt_close($stmt);
+    return $c;
 }
 
 function db_list_staff($conn, $storeId) {
@@ -680,29 +743,35 @@ function db_find_staff_by_code($conn, $storeId, $staffCode) {
  * $pin 傳空字串代表「不修改現有 PIN」—— 編輯姓名或權限時不該被迫重設 PIN。
  * 新增時則必填。
  */
-function db_save_staff($conn, $id, $storeId, $staffCode, $name, $pin, $canRefund, $active, $note) {
+function db_save_staff($conn, $id, $storeId, $staffCode, $name, $pin, $canRefund, $active, $note,
+                      $cardUid = null, $canEnroll = 0) {
+    // 空字串一律轉成 NULL：UNIQUE 索引允許多個 NULL，但不允許多個空字串 ——
+    // 不轉的話第二位沒有卡片的店員會存不進去。
+    if ($cardUid === '') { $cardUid = null; }
+
     if ($id) {
         if ($pin !== '') {
             $hash = password_hash($pin, PASSWORD_DEFAULT);
             $stmt = mysqli_prepare($conn,
-                'UPDATE store_staff SET staff_code=?, name=?, pin_hash=?, can_refund=?,
-                        active=?, note=? WHERE id=?');
-            mysqli_stmt_bind_param($stmt, 'sssiisi', $staffCode, $name, $hash,
-                $canRefund, $active, $note, $id);
+                'UPDATE store_staff SET staff_code=?, name=?, pin_hash=?, card_uid=?,
+                        can_refund=?, can_enroll=?, active=?, note=? WHERE id=?');
+            mysqli_stmt_bind_param($stmt, 'ssssiiisi', $staffCode, $name, $hash, $cardUid,
+                $canRefund, $canEnroll, $active, $note, $id);
         } else {
             $stmt = mysqli_prepare($conn,
-                'UPDATE store_staff SET staff_code=?, name=?, can_refund=?,
-                        active=?, note=? WHERE id=?');
-            mysqli_stmt_bind_param($stmt, 'ssiisi', $staffCode, $name,
-                $canRefund, $active, $note, $id);
+                'UPDATE store_staff SET staff_code=?, name=?, card_uid=?, can_refund=?,
+                        can_enroll=?, active=?, note=? WHERE id=?');
+            mysqli_stmt_bind_param($stmt, 'sssiiisi', $staffCode, $name, $cardUid,
+                $canRefund, $canEnroll, $active, $note, $id);
         }
     } else {
         $hash = password_hash($pin, PASSWORD_DEFAULT);
         $stmt = mysqli_prepare($conn,
-            'INSERT INTO store_staff (store_id, staff_code, name, pin_hash, can_refund, active, note)
-             VALUES (?,?,?,?,?,?,?)');
-        mysqli_stmt_bind_param($stmt, 'isssiis', $storeId, $staffCode, $name, $hash,
-            $canRefund, $active, $note);
+            'INSERT INTO store_staff (store_id, staff_code, name, pin_hash, card_uid,
+                                      can_refund, can_enroll, active, note)
+             VALUES (?,?,?,?,?,?,?,?,?)');
+        mysqli_stmt_bind_param($stmt, 'issssiiis', $storeId, $staffCode, $name, $hash, $cardUid,
+            $canRefund, $canEnroll, $active, $note);
     }
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('儲存店員失敗：' . mysqli_stmt_error($stmt));
