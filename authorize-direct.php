@@ -48,6 +48,29 @@ $expiryMonth = isset($input['expiryMonth']) ? $input['expiryMonth'] : '';
 $expiryYear = isset($input['expiryYear']) ? $input['expiryYear'] : '';
 $cvv = isset($input['cvv']) ? $input['cvv'] : '';
 
+/*
+ * 分期期數（PAYUNi 的 CardInst，放在 EncryptInfo 內）。
+ *   1  = 一次付清（PAYUNi 的預設值）
+ *   3 / 6 / 9 / 12 / 18 / 24 / 30 = 分期
+ *
+ * 用白名單擋掉其他值：帶了不合法的期數只會拿到 CREDIT02020
+ *（信用卡分期數，期數格式錯誤），在收銀台前才失敗代價太高，先擋在這裡。
+ *
+ * ⚠️ 期數合法不代表一定能刷過，還有兩層限制不在我們控制範圍：
+ *   - CREDIT03003 商店未提供信用卡分期 —— 帳號層級，要先向 PAYUNi 申請
+ *   - CREDIT02035 不提供國外卡分期 —— 看客人那張卡
+ * 這兩種都會在授權階段失敗，錯誤訊息會照實回傳給收銀員。
+ */
+$allowedInst = array(1, 3, 6, 9, 12, 18, 24, 30);
+$cardInst = isset($input['cardInst']) ? $input['cardInst'] : 1;
+if (!is_numeric($cardInst) || !in_array((int) $cardInst, $allowedInst, true)) {
+    respond(400, array(
+        'status' => 'failed',
+        'message' => '分期期數不正確，只能是 ' . implode(' / ', $allowedInst),
+    ));
+}
+$cardInst = (int) $cardInst;
+
 if ($merTradeNo === '' || $amount === null || $cardNumber === '' || $expiryMonth === '' || $expiryYear === '') {
     respond(400, array('status' => 'failed', 'message' => '缺少必要付款資訊'));
 }
@@ -102,6 +125,11 @@ $encryptInfoParams = array(
 if ($cvv !== '') {
     $encryptInfoParams['CardCVC'] = $cvv;
 }
+// 一次付清時不帶 CardInst —— 1 本來就是 PAYUNi 的預設值，少帶一個欄位
+// 就少一個出錯的可能（這條路徑目前每天都在跑，不要動它的行為）。
+if ($cardInst > 1) {
+    $encryptInfoParams['CardInst'] = (string) $cardInst;
+}
 $encryptInfoParams['ProdDesc'] = $description !== '' ? $description : '商品訂單';
 $encryptInfoParams['NotifyURL'] = PUBLIC_BASE_URL . '/notify-direct.php';
 
@@ -138,8 +166,43 @@ if ($conn) {
         }
     }
 
+    /*
+     * 伺服器端的冪等保護：這個訂單編號如果已經有結果了，直接回傳既有結果，
+     * 不要再打一次 PAYUNi。
+     *
+     * 為什麼需要 —— 2026-07-20 實測踩到：一次點擊卻送出兩次（OkHttp 的
+     * retryOnConnectionFailure 預設會自動重送），第二次拿到
+     * 「CREDIT04001 已存在相同商店訂單編號」，然後**用這個錯誤覆蓋掉第一次
+     * 真正的失敗原因**，事後完全查不出當初為什麼失敗。
+     *
+     * PAYUNi 的 MerTradeNo 去重是最後一道防線，不該讓它變成日常依賴。
+     * 在這裡擋掉有兩個好處：不會重複送出、也保住了原始的診斷資訊。
+     *
+     * 只擋已有結論（success/failed）的訂單。still pending 的代表前一次
+     * 沒拿到回應，那種情況要讓它重送 —— PAYUNi 會用 MerTradeNo 判斷是否
+     * 已經授權過，這是正確的處理方式。
+     */
+    $existing = db_find_order($conn, $merTradeNo);
+    if ($existing && in_array($existing['status'], array('success', 'failed'), true)) {
+        error_log("訂單 {$merTradeNo} 已有結果（{$existing['status']}），不重複送出");
+        if ($existing['status'] === 'success') {
+            respond(200, array(
+                'status' => 'success',
+                'payuniTradeNo' => $existing['payuni_trade_no'],
+                'authCode' => $existing['auth_code'],
+                'card4No' => $existing['card4_no'],
+                'duplicate' => true,
+            ));
+        }
+        respond(200, array(
+            'status' => 'failed',
+            'message' => $existing['message'] !== '' ? $existing['message'] : '交易未通過',
+            'duplicate' => true,
+        ));
+    }
+
     try {
-        db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId, $deviceSerial);
+        db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId, $deviceSerial, $cardInst);
     } catch (Exception $e) {
         error_log('寫入 pending 訂單失敗：' . $e->getMessage());
         // 資料庫寫入失敗不擋交易，continue，但要記 log 之後追查

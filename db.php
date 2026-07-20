@@ -125,6 +125,18 @@ function db_create_devices_table_if_not_exists($conn) {
     $orderCols = array(
         'device_id' => "ALTER TABLE orders ADD COLUMN device_id VARCHAR(64) NULL, ADD INDEX idx_device (device_id)",
         'device_serial' => "ALTER TABLE orders ADD COLUMN device_serial VARCHAR(64) NULL",
+        // 分期期數。1 = 一次付清（PAYUNi 的 CardInst 預設值），3/6/9/12/18/24/30 = 分期。
+        // 預設 1 讓既有資料自動視為一次付清，不用回頭補。
+        // 退款時必須看這個欄位 —— 分期交易只能全額退款，不能部分退。
+        'card_inst' => "ALTER TABLE orders ADD COLUMN card_inst INT NOT NULL DEFAULT 1",
+        /*
+         * 這筆交易走哪一家上游。系統未來會接不只一家（其他金流商、收單銀行、
+         * 電子支付機構），對帳、退款、爭議處理都得知道當初是誰授權的。
+         *
+         * 從現在就記錄，是因為**這個欄位補不回來** —— 等真的接了第二家上游
+         * 才加，之前的交易永遠不知道走哪家。預設 payuni 讓既有資料自動正確。
+         */
+        'provider' => "ALTER TABLE orders ADD COLUMN provider VARCHAR(32) NOT NULL DEFAULT 'payuni', ADD INDEX idx_provider (provider)",
     );
     foreach ($orderCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM orders LIKE '$col'");
@@ -276,10 +288,58 @@ function db_list_devices($conn) {
 }
 
 /** 交易送出前先寫一筆 pending 紀錄，拿到 PAYUNi 回應後再更新 */
-function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null) {
-    $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial) VALUES (?, ?, ?, ?, ?)');
+/**
+ * 商店開通狀態的快取表。
+ *
+ * 為什麼要存起來：每台收銀機開機都查，App 被系統回收後重啟又會再查一次，
+ * 實際呼叫次數遠超想像。而商店的開通狀態是幾天甚至幾個月才變一次的東西，
+ * 沒有理由即時查。查詢失敗時也能回退到這裡的舊資料 —— 昨天的結果拿來做
+ * 灰階顯示完全可以接受，總比沒有好。
+ */
+function db_create_merchant_status_table_if_not_exists($conn) {
+    // 主鍵是「上游代號:商店代號」（例如 payuni:NEDC82798291）——
+    // 不同上游的同一個商店代號是不同的東西，不能共用一列。
+    $sql = "
+        CREATE TABLE IF NOT EXISTS merchant_status (
+            mer_id VARCHAR(96) NOT NULL PRIMARY KEY,
+            payload TEXT NOT NULL,
+            fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 merchant_status 資料表失敗：' . mysqli_error($conn));
+    }
+}
+
+function db_get_merchant_status($conn, $merId) {
+    $stmt = mysqli_prepare($conn, 'SELECT payload, fetched_at FROM merchant_status WHERE mer_id = ?');
+    mysqli_stmt_bind_param($stmt, 's', $merId);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    $row = $result ? mysqli_fetch_assoc($result) : null;
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+function db_save_merchant_status($conn, $merId, $payload) {
+    $stmt = mysqli_prepare(
+        $conn,
+        'INSERT INTO merchant_status (mer_id, payload, fetched_at) VALUES (?, ?, NOW())
+         ON DUPLICATE KEY UPDATE payload = VALUES(payload), fetched_at = NOW()'
+    );
+    mysqli_stmt_bind_param($stmt, 'ss', $merId, $payload);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('寫入商店狀態快取失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null, $cardInst = 1) {
+    $stmt = mysqli_prepare($conn, 'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial, card_inst) VALUES (?, ?, ?, ?, ?, ?)');
     $status = 'pending';
-    mysqli_stmt_bind_param($stmt, 'sisss', $merTradeNo, $amount, $status, $deviceId, $deviceSerial);
+    // 注意型別字串：card_inst 是 i，接在三個 s 後面。之前 appVersion 就因為
+    // 型別對錯位置，把 "0.1-dev" 靜默轉成 0。
+    mysqli_stmt_bind_param($stmt, 'sisssi', $merTradeNo, $amount, $status, $deviceId, $deviceSerial, $cardInst);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('寫入訂單紀錄失敗：' . mysqli_stmt_error($stmt));
     }

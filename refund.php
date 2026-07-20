@@ -167,6 +167,19 @@ if ($amount > $orderAmount) {
     ));
 }
 
+// 分期付款只能全額退款（官方文件載明，銀聯卡也是）。不擋的話會送出一筆
+// 注定被 PAYUNi 拒絕的請求，而且錯誤訊息不會說是分期的關係，操作者會
+// 卡在那邊猜。這裡先擋下並講清楚。
+$orderInst = isset($order['card_inst']) ? (int) $order['card_inst'] : 1;
+if ($orderInst > 1 && $amount !== $orderAmount) {
+    respond(400, array(
+        'status' => 'failed',
+        'message' => "這筆是 {$orderInst} 期分期交易，只能全額退款（{$orderAmount} 元），不能部分退款。",
+        'cardInst' => $orderInst,
+        'orderAmount' => $orderAmount,
+    ));
+}
+
 // 擋住重複退款：已成功退掉的金額 + 這次要退的，不能超過訂單金額。
 // 這是防呆，不是完整的併發保護（同時打兩次還是可能都通過檢查），
 // 真正的最後一道防線是 PAYUNi 端會拒絕超額退款。
