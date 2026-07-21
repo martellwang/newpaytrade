@@ -11,6 +11,7 @@ function admin_header($title, $active = '') {
         'merchant.php' => '商店狀態',
         'providers.php' => '上游管理',
         'apk.php' => '安裝檔',
+        'settings.php' => '系統設定',
     );
     ?><!DOCTYPE html>
 <html lang="zh-Hant">

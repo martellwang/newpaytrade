@@ -595,6 +595,51 @@ function db_create_pos_locks_table_if_not_exists($conn) {
     }
 }
 
+// ── 系統設定（總管理者可調整的全站參數）─────────────────────────
+
+/**
+ * 通用的 key-value 設定表。
+ *
+ * 現在只有一項設定（交易紀錄預設每頁筆數），但用 key-value 而不是在
+ * config.php 開一個常數，是因為**這是要讓總管理者在後台自己改的**，
+ * 常數改了要動到主機檔案，一般管理者做不到。之後若有其他要讓後台調整
+ * 的全站參數，直接多存一個 name 就好，不必再開新表。
+ */
+function db_create_app_settings_table_if_not_exists($conn) {
+    $sql = "
+        CREATE TABLE IF NOT EXISTS app_settings (
+            name VARCHAR(64) PRIMARY KEY,
+            value VARCHAR(255) NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sql)) {
+        throw new Exception('建立 app_settings 資料表失敗：' . mysqli_error($conn));
+    }
+}
+
+/** 讀取設定值，沒有設定過就回傳 $default（不會寫入資料庫） */
+function db_get_setting($conn, $name, $default = null) {
+    $stmt = mysqli_prepare($conn, 'SELECT value FROM app_settings WHERE name = ?');
+    mysqli_stmt_bind_param($stmt, 's', $name);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ? $row['value'] : $default;
+}
+
+/** 寫入或更新設定值 */
+function db_set_setting($conn, $name, $value) {
+    $stmt = mysqli_prepare($conn,
+        'INSERT INTO app_settings (name, value) VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE value = VALUES(value)');
+    mysqli_stmt_bind_param($stmt, 'ss', $name, $value);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存設定失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
 // ── 店員 ────────────────────────────────────────────────────────
 
 /**

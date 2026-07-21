@@ -6,6 +6,7 @@ require_once __DIR__ . '/layout.php';
 admin_require_login();
 
 $conn = db_connect();
+db_create_app_settings_table_if_not_exists($conn);
 
 // ---- 篩選條件 ----
 $from    = isset($_GET['from']) ? trim($_GET['from']) : date('Y-m-d', strtotime('-7 days'));
@@ -14,12 +15,22 @@ $status  = isset($_GET['status']) ? trim($_GET['status']) : '';
 $keyword = isset($_GET['q']) ? trim($_GET['q']) : '';
 $page    = max(1, (int) (isset($_GET['page']) ? $_GET['page'] : 1));
 
-// 每頁筆數：走白名單而不是直接信任使用者輸入的數字 —— 否則 ?perPage=100000
-// 這種請求會讓單次查詢把整個資料表撈出來，拖垮頁面也拖垮資料庫。
-$allowedPerPage = array(20, 50, 100);
-$perPage = isset($_GET['perPage']) ? (int) $_GET['perPage'] : 20;
+/*
+ * 每頁筆數：走白名單而不是直接信任使用者輸入的數字 —— 否則 ?perPage=100000
+ * 這種請求會讓單次查詢把整個資料表撈出來，拖垮頁面也拖垮資料庫。
+ *
+ * 沒帶 ?perPage 時用的預設值改由總管理者在「系統設定」頁面調整
+ * （見 admin/settings.php），不再寫死在這裡。db_get_setting 查不到值
+ * 時退回 25 —— 那是尚未進過設定頁的全新安裝會用到的情況。
+ */
+$allowedPerPage = array(25, 50, 100);
+$defaultPerPage = (int) db_get_setting($conn, 'default_page_size', 25);
+if (!in_array($defaultPerPage, $allowedPerPage, true)) {
+    $defaultPerPage = 25;
+}
+$perPage = isset($_GET['perPage']) ? (int) $_GET['perPage'] : $defaultPerPage;
 if (!in_array($perPage, $allowedPerPage, true)) {
-    $perPage = 20;
+    $perPage = $defaultPerPage;
 }
 
 // 序號排序方向：desc（預設，新到舊）／asc（舊到新）。點表頭切換。
