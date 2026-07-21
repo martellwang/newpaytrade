@@ -13,7 +13,17 @@ $to      = isset($_GET['to']) ? trim($_GET['to']) : date('Y-m-d');
 $status  = isset($_GET['status']) ? trim($_GET['status']) : '';
 $keyword = isset($_GET['q']) ? trim($_GET['q']) : '';
 $page    = max(1, (int) (isset($_GET['page']) ? $_GET['page'] : 1));
-$perPage = 50;
+
+// 每頁筆數：走白名單而不是直接信任使用者輸入的數字 —— 否則 ?perPage=100000
+// 這種請求會讓單次查詢把整個資料表撈出來，拖垮頁面也拖垮資料庫。
+$allowedPerPage = array(20, 50, 100);
+$perPage = isset($_GET['perPage']) ? (int) $_GET['perPage'] : 20;
+if (!in_array($perPage, $allowedPerPage, true)) {
+    $perPage = 20;
+}
+
+// 序號排序方向：desc（預設，新到舊）／asc（舊到新）。點表頭切換。
+$sort = (isset($_GET['sort']) && $_GET['sort'] === 'asc') ? 'asc' : 'desc';
 
 // 日期格式異常就退回預設值，避免帶進查詢造成錯誤
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) $from = date('Y-m-d', strtotime('-7 days'));
@@ -70,11 +80,12 @@ $totalPages = max(1, (int) ceil($total / $perPage));
 $page = min($page, $totalPages);
 $offset = ($page - 1) * $perPage;
 
+$orderSql = ($sort === 'asc') ? 'id ASC' : 'id DESC';
 $stmt = mysqli_prepare(
     $conn,
     "SELECT id, mer_trade_no, amount, status, payuni_trade_no, auth_code, card4_no,
             message, created_at, card_inst, provider
-     FROM orders WHERE $whereSql ORDER BY id DESC LIMIT ? OFFSET ?"
+     FROM orders WHERE $whereSql ORDER BY $orderSql LIMIT ? OFFSET ?"
 );
 mysqli_stmt_bind_param($stmt, $types . 'ii', ...array_merge($args, array($perPage, $offset)));
 mysqli_stmt_execute($stmt);
@@ -121,7 +132,36 @@ mysqli_stmt_execute($stmt);
 $refundedTotal = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['refunded'];
 mysqli_stmt_close($stmt);
 
-$qs = http_build_query(array('from' => $from, 'to' => $to, 'status' => $status, 'q' => $keyword));
+// 不含 page 的查詢字串，分頁連結與每頁筆數切換都以此為底加上各自的 page 值
+$qs = http_build_query(array(
+    'from' => $from, 'to' => $to, 'status' => $status, 'q' => $keyword,
+    'perPage' => $perPage, 'sort' => $sort,
+));
+
+/*
+ * 換頁大小或換排序方向時一律跳回第 1 頁。
+ *
+ * 沿用原本的頁碼會對不上——換成每頁 100 筆時，原本第 3 頁（第 41-60 筆）
+ * 在新的分頁方式下可能已經是全部資料的最後一頁之後，撈出來是空的，
+ * 使用者會以為查詢壞了。
+ */
+function admin_index_pager_url($baseQs, $page) {
+    return '?' . $baseQs . '&page=' . $page;
+}
+
+/** 分頁列，上下各放一份用的共用元件 */
+function render_pager($page, $totalPages, $qs) {
+    if ($totalPages <= 1) return;
+    echo '<div class="pager">';
+    if ($page > 1) {
+        echo '<a class="btn2" href="' . h(admin_index_pager_url($qs, $page - 1)) . '">上一頁</a>';
+    }
+    echo '<span class="muted">第 ' . $page . ' / ' . $totalPages . ' 頁</span>';
+    if ($page < $totalPages) {
+        echo '<a class="btn2" href="' . h(admin_index_pager_url($qs, $page + 1)) . '">下一頁</a>';
+    }
+    echo '</div>';
+}
 
 admin_header('交易紀錄', 'index.php');
 ?>
@@ -180,20 +220,49 @@ admin_header('交易紀錄', 'index.php');
   </div>
 </div>
 
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+    <?php render_pager($page, $totalPages, $qs); ?>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="muted" style="font-size:13px">每頁筆數</span>
+      <?php foreach ($allowedPerPage as $pp): ?>
+        <?php if ($pp === $perPage): ?>
+          <span class="btn2" style="background:#5a3d99;color:#fff;border-color:#5a3d99"><?= $pp ?></span>
+        <?php else: ?>
+          <a class="btn2" href="<?= h(admin_index_pager_url(
+              http_build_query(array('from' => $from, 'to' => $to, 'status' => $status,
+                  'q' => $keyword, 'perPage' => $pp, 'sort' => $sort)), 1)) ?>"><?= $pp ?></a>
+        <?php endif; ?>
+      <?php endforeach; ?>
+    </div>
+  </div>
+</div>
+
 <div class="card wrap">
   <table>
     <thead>
       <tr>
+        <th>
+          <a href="<?= h(admin_index_pager_url(
+              http_build_query(array('from' => $from, 'to' => $to, 'status' => $status,
+                  'q' => $keyword, 'perPage' => $perPage, 'sort' => $sort === 'asc' ? 'desc' : 'asc')), 1)) ?>"
+             style="color:inherit;text-decoration:none">
+            序號 <?= $sort === 'asc' ? '▲' : '▼' ?>
+          </a>
+        </th>
         <th>時間</th><th>訂單編號</th><th class="right">金額</th><th>狀態</th>
         <th>上游</th><th>卡號末四碼</th><th>授權碼</th><th>交易序號</th><th>訊息</th><th></th>
       </tr>
     </thead>
     <tbody>
       <?php if (!$rows): ?>
-        <tr><td colspan="10" class="muted">這個區間沒有交易紀錄</td></tr>
+        <tr><td colspan="11" class="muted">這個區間沒有交易紀錄</td></tr>
       <?php endif; ?>
+      <?php $seq = $offset; ?>
       <?php foreach ($rows as $r): ?>
+      <?php $seq++; ?>
       <tr>
+        <td class="muted"><?= $seq ?></td>
         <td><?= h($r['created_at']) ?></td>
         <td><?= h($r['mer_trade_no']) ?></td>
         <td class="right">
@@ -229,16 +298,8 @@ admin_header('交易紀錄', 'index.php');
   </table>
 </div>
 
-<?php if ($totalPages > 1): ?>
 <div class="card">
-  <?php if ($page > 1): ?>
-    <a class="btn2" href="?<?= h($qs) ?>&page=<?= $page - 1 ?>">上一頁</a>
-  <?php endif; ?>
-  <span class="muted">第 <?= $page ?> / <?= $totalPages ?> 頁</span>
-  <?php if ($page < $totalPages): ?>
-    <a class="btn2" href="?<?= h($qs) ?>&page=<?= $page + 1 ?>">下一頁</a>
-  <?php endif; ?>
+  <?php render_pager($page, $totalPages, $qs); ?>
 </div>
-<?php endif; ?>
 
 <?php admin_footer(); ?>

@@ -62,6 +62,7 @@ button { padding:8px 18px; border:0; border-radius:6px; background:#5a3d99;
 .kpi .val { font-size:22px; font-weight:600; margin-top:4px; }
 .muted { color:#888; font-size:13px; }
 .right { text-align:right; }
+.pager { display:flex; align-items:center; gap:12px; }
 </style>
 </head>
 <body>
