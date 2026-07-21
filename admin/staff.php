@@ -14,12 +14,14 @@
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/../db.php';
 require_once __DIR__ . '/layout.php';
+require_once __DIR__ . '/pagination.php';
 
 admin_require_login();
 
 $conn = db_connect();
 db_create_merchants_table_if_not_exists($conn);
 db_create_store_staff_table_if_not_exists($conn);
+db_create_app_settings_table_if_not_exists($conn);
 
 $storeId = isset($_GET['store']) ? (int) $_GET['store'] : 0;
 $store = $storeId ? db_find_store($conn, $storeId) : null;
@@ -29,6 +31,15 @@ if (!$store) {
     admin_footer();
     exit;
 }
+
+/*
+ * 每頁筆數共用同一個系統設定值（page_size_staff），不分店各自設定 ——
+ * 這是總管理者在「系統設定」調的全站預設，不是每家店各自的偏好。
+ */
+$allowedPerPage = array(25, 50, 100);
+$perPage = admin_resolve_page_size($conn, 'page_size_staff', $allowedPerPage);
+$sort = admin_resolve_sort();
+$page = max(1, (int) (isset($_GET['page']) ? $_GET['page'] : 1));
 
 $flash = null;
 $error = null;
@@ -89,7 +100,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$staff = db_list_staff($conn, $storeId);
+$totalStaff = db_count_staff_in_store($conn, $storeId);
+$totalPages = max(1, (int) ceil($totalStaff / $perPage));
+$page = min($page, $totalPages);
+$staff = db_list_staff($conn, $storeId, $perPage, ($page - 1) * $perPage, $sort);
+
+$baseParams = array('store' => $storeId, 'perPage' => $perPage, 'sort' => $sort);
+$qs = http_build_query($baseParams);
+
 $editId = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editRow = $editId ? db_find_staff($conn, $editId) : null;
 // 只能編輯這家店自己的店員 —— 換個 id 就跨店編輯是不行的
@@ -122,16 +140,27 @@ admin_header('店員管理');
 <?php if ($error): ?><div class="card" style="border-left:4px solid #c62828"><?= h($error) ?></div><?php endif; ?>
 
 <div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+    <?php admin_render_pager($page, $totalPages, $qs); ?>
+    <?php admin_render_page_size_switcher($allowedPerPage, $perPage, $baseParams); ?>
+  </div>
+</div>
+
+<div class="card">
   <table style="width:100%;border-collapse:collapse">
-    <thead><tr><th>工號</th><th>姓名</th><th>感應卡</th><th>可退款</th><th>可建檔</th>
+    <thead><tr><th><?php admin_sortable_header('序號', $sort, $baseParams); ?></th>
+        <th>工號</th><th>姓名</th><th>感應卡</th><th>可退款</th><th>可建檔</th>
         <th>狀態</th><th>備註</th><th></th></tr></thead>
     <tbody>
       <?php if (!$staff): ?>
-        <tr><td colspan="8" class="muted">尚未建立店員。沒有店員的話收銀機仍可收款，
+        <tr><td colspan="9" class="muted">尚未建立店員。沒有店員的話收銀機仍可收款，
             只是交易查不到經手人，也無法交班。</td></tr>
       <?php endif; ?>
+      <?php $seq = ($page - 1) * $perPage; ?>
       <?php foreach ($staff as $s): ?>
+      <?php $seq++; ?>
       <tr style="border-top:1px solid #eee">
+        <td class="muted"><?= $seq ?></td>
         <td><?= h($s['staff_code']) ?></td>
         <td><?= h($s['name']) ?></td>
         <td><?= !empty($s['card_uid'])
@@ -141,11 +170,15 @@ admin_header('店員管理');
         <td><?= (isset($s['can_enroll']) && (int) $s['can_enroll'] === 1) ? '是' : '—' ?></td>
         <td><?= ((int) $s['active'] === 1) ? '啟用' : '<span class="muted">停用</span>' ?></td>
         <td class="muted"><?= h($s['note']) ?></td>
-        <td><a class="btn2" href="?store=<?= $storeId ?>&amp;edit=<?= (int) $s['id'] ?>">編輯</a></td>
+        <td><a class="btn2" href="?<?= h($qs) ?>&amp;page=<?= $page ?>&amp;edit=<?= (int) $s['id'] ?>">編輯</a></td>
       </tr>
       <?php endforeach; ?>
     </tbody>
   </table>
+</div>
+
+<div class="card">
+  <?php admin_render_pager($page, $totalPages, $qs); ?>
 </div>
 
 <?php if ($isNew || $editRow): ?>
@@ -211,7 +244,7 @@ admin_header('店員管理');
 
     <button type="submit" style="background:#5a3d99;color:#fff;border:0;padding:8px 20px;
                                  border-radius:6px;cursor:pointer">儲存</button>
-    <a class="btn2" href="?store=<?= $storeId ?>" style="margin-left:8px">取消</a>
+    <a class="btn2" href="?<?= h($qs) ?>&amp;page=<?= $page ?>" style="margin-left:8px">取消</a>
   </form>
 
   <?php if ($editRow): ?>

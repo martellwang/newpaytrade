@@ -12,9 +12,16 @@
 
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/layout.php';
+require_once __DIR__ . '/pagination.php';
 admin_require_login();
 
 $conn = db_connect();
+db_create_app_settings_table_if_not_exists($conn);
+
+$allowedPerPage = array(25, 50, 100);
+$perPage = admin_resolve_page_size($conn, 'page_size_report', $allowedPerPage);
+$sort = admin_resolve_sort();
+$page = max(1, (int) (isset($_GET['page']) ? $_GET['page'] : 1));
 
 $from = isset($_GET['from']) ? trim($_GET['from']) : date('Y-m-01');
 $to   = isset($_GET['to']) ? trim($_GET['to']) : date('Y-m-d');
@@ -53,7 +60,15 @@ mysqli_stmt_close($stmt);
 
 $netAmount = (int) $sum['success_amt'] - (int) $ref['amt'];
 
-/** 逐日明細 */
+/*
+ * 逐日明細。
+ *
+ * 這裡不像交易紀錄那樣用 SQL 的 LIMIT/OFFSET 分頁 —— 這是按日彙總
+ * （GROUP BY DATE），列數等於篩選區間的天數，本來就被起訖日期夾住，
+ * 就算選一整年也才 365 列，PHP 端 array_slice 完全夠用，不需要為了
+ * 分頁就把同一個彙總查詢多打一次。
+ */
+$dailyOrder = ($sort === 'asc') ? 'ASC' : 'DESC';
 $stmt = mysqli_prepare($conn,
     "SELECT DATE(created_at) AS d,
             COUNT(*) AS total_cnt,
@@ -63,11 +78,19 @@ $stmt = mysqli_prepare($conn,
             COALESCE(SUM(CASE WHEN status='success' THEN amount ELSE 0 END),0) AS success_amt
      FROM orders
      WHERE created_at >= ? AND created_at < DATE_ADD(?, INTERVAL 1 DAY)
-     GROUP BY DATE(created_at) ORDER BY d DESC");
+     GROUP BY DATE(created_at) ORDER BY d $dailyOrder");
 mysqli_stmt_bind_param($stmt, 'ss', $from, $to);
 mysqli_stmt_execute($stmt);
-$daily = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
+$dailyAll = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
 mysqli_stmt_close($stmt);
+
+$totalDays = count($dailyAll);
+$totalPages = max(1, (int) ceil($totalDays / $perPage));
+$page = min($page, $totalPages);
+$daily = array_slice($dailyAll, ($page - 1) * $perPage, $perPage);
+
+$baseParams = array('from' => $from, 'to' => $to, 'perPage' => $perPage, 'sort' => $sort);
+$qs = http_build_query($baseParams);
 
 /** 逐日退款，跟上面的逐日交易併表顯示 */
 $stmt = mysqli_prepare($conn,
@@ -127,11 +150,18 @@ admin_header('對帳報表', 'report.php');
   </div>
 </div>
 
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+    <?php admin_render_pager($page, $totalPages, $qs); ?>
+    <?php admin_render_page_size_switcher($allowedPerPage, $perPage, $baseParams); ?>
+  </div>
+</div>
+
 <div class="card wrap">
   <table>
     <thead>
       <tr>
-        <th>日期</th>
+        <th><?php admin_sortable_header('日期', $sort, $baseParams); ?></th>
         <th class="right">成功筆數</th><th class="right">成功金額</th>
         <th class="right">退款筆數</th><th class="right">退款金額</th>
         <th class="right">淨額</th>
@@ -163,6 +193,10 @@ admin_header('對帳報表', 'report.php');
       <?php endforeach; ?>
     </tbody>
   </table>
+</div>
+
+<div class="card">
+  <?php admin_render_pager($page, $totalPages, $qs); ?>
 </div>
 
 <div class="card muted">

@@ -10,11 +10,18 @@
 
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/layout.php';
+require_once __DIR__ . '/pagination.php';
 admin_require_login();
 
 $conn = db_connect();
+db_create_app_settings_table_if_not_exists($conn);
 $msg = null;
 $err = null;
+
+$allowedPerPage = array(25, 50, 100);
+$perPage = admin_resolve_page_size($conn, 'page_size_devices', $allowedPerPage);
+$sort = admin_resolve_sort();
+$page = max(1, (int) (isset($_GET['page']) ? $_GET['page'] : 1));
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!admin_verify_csrf(isset($_POST['csrf']) ? $_POST['csrf'] : '')) {
@@ -60,7 +67,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$devices = db_list_devices($conn);
+$totalDevices = db_count_devices($conn);
+$totalPages = max(1, (int) ceil($totalDevices / $perPage));
+$page = min($page, $totalPages);
+$devices = db_list_devices($conn, $perPage, ($page - 1) * $perPage, $sort);
+
+$baseParams = array('perPage' => $perPage, 'sort' => $sort);
+$qs = http_build_query($baseParams);
+// 編輯連結要帶著目前的分頁狀態，不然點「編輯」會跳回第 1 頁
+$pageQs = $qs . '&page=' . $page;
+
 $csrf = admin_csrf_token();
 $editId = isset($_GET['edit']) ? $_GET['edit'] : null;
 
@@ -72,8 +88,15 @@ admin_header('收銀機', 'devices.php');
 
 <div class="card">
   <div class="muted">
-    共 <?= count($devices) ?> 台。App 每次交易會自動更新機器資料；
+    共 <?= number_format($totalDevices) ?> 台。App 每次交易會自動更新機器資料；
     機台編號、名稱、備註是人工設定的，不會被自動覆蓋。
+  </div>
+</div>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+    <?php admin_render_pager($page, $totalPages, $qs); ?>
+    <?php admin_render_page_size_switcher($allowedPerPage, $perPage, $baseParams); ?>
   </div>
 </div>
 
@@ -81,6 +104,7 @@ admin_header('收銀機', 'devices.php');
   <table>
     <thead>
       <tr>
+        <th><?php admin_sortable_header('序號', $sort, $baseParams); ?></th>
         <th>機台編號 / 名稱</th>
         <th>廠牌 / 型號</th>
         <th>序號 (UID)</th>
@@ -94,10 +118,13 @@ admin_header('收銀機', 'devices.php');
     </thead>
     <tbody>
       <?php if (!$devices): ?>
-        <tr><td colspan="9" class="muted">尚無登記的機器。App 完成第一筆交易後會自動出現。</td></tr>
+        <tr><td colspan="10" class="muted">尚無登記的機器。App 完成第一筆交易後會自動出現。</td></tr>
       <?php endif; ?>
+      <?php $seq = ($page - 1) * $perPage; ?>
       <?php foreach ($devices as $d): ?>
+      <?php $seq++; ?>
       <tr>
+        <td class="muted"><?= $seq ?></td>
         <td>
           <strong><?= h($d['terminal_uid'] ?: '—') ?></strong>
           <?php if ($d['name']): ?><div class="muted"><?= h($d['name']) ?></div><?php endif; ?>
@@ -127,12 +154,12 @@ admin_header('收銀機', 'devices.php');
         <td class="right"><?= h(money($d['success_amt'])) ?></td>
         <td><?= h($d['last_seen']) ?></td>
         <td>
-          <a class="btn2" href="?edit=<?= h(urlencode($d['device_id'])) ?>">編輯</a>
+          <a class="btn2" href="?<?= h($pageQs) ?>&edit=<?= h(urlencode($d['device_id'])) ?>">編輯</a>
           <a class="btn2" href="index.php?q=<?= h(urlencode($d['device_id'])) ?>">交易</a>
         </td>
       </tr>
       <?php if ($editId === $d['device_id']): ?>
-      <tr><td colspan="9" style="background:#faf8ff">
+      <tr><td colspan="10" style="background:#faf8ff">
         <form method="post" class="filters">
           <input type="hidden" name="csrf" value="<?= h($csrf) ?>">
           <input type="hidden" name="action" value="update">
@@ -141,7 +168,7 @@ admin_header('收銀機', 'devices.php');
           <div><label>名稱</label><input type="text" name="name" value="<?= h($d['name']) ?>" placeholder="例如 一號櫃檯"></div>
           <div style="flex:1"><label>備註</label><input type="text" name="note" value="<?= h($d['note']) ?>" style="width:100%" placeholder="例如 讀卡需 Urovo SDK"></div>
           <div><button type="submit">儲存</button></div>
-          <div><a class="btn2" href="devices.php">取消</a></div>
+          <div><a class="btn2" href="?<?= h($qs) ?>&page=<?= $page ?>">取消</a></div>
         </form>
         <form method="post" style="margin-top:10px"
               onsubmit="return confirm('確定刪除這台機器的登記？歷史交易紀錄不受影響。');">
@@ -155,6 +182,10 @@ admin_header('收銀機', 'devices.php');
       <?php endforeach; ?>
     </tbody>
   </table>
+</div>
+
+<div class="card">
+  <?php admin_render_pager($page, $totalPages, $qs); ?>
 </div>
 
 <div class="card">

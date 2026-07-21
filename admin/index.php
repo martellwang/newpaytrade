@@ -3,6 +3,7 @@
 
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/layout.php';
+require_once __DIR__ . '/pagination.php';
 admin_require_login();
 
 $conn = db_connect();
@@ -15,26 +16,9 @@ $status  = isset($_GET['status']) ? trim($_GET['status']) : '';
 $keyword = isset($_GET['q']) ? trim($_GET['q']) : '';
 $page    = max(1, (int) (isset($_GET['page']) ? $_GET['page'] : 1));
 
-/*
- * 每頁筆數：走白名單而不是直接信任使用者輸入的數字 —— 否則 ?perPage=100000
- * 這種請求會讓單次查詢把整個資料表撈出來，拖垮頁面也拖垮資料庫。
- *
- * 沒帶 ?perPage 時用的預設值改由總管理者在「系統設定」頁面調整
- * （見 admin/settings.php），不再寫死在這裡。db_get_setting 查不到值
- * 時退回 25 —— 那是尚未進過設定頁的全新安裝會用到的情況。
- */
 $allowedPerPage = array(25, 50, 100);
-$defaultPerPage = (int) db_get_setting($conn, 'default_page_size', 25);
-if (!in_array($defaultPerPage, $allowedPerPage, true)) {
-    $defaultPerPage = 25;
-}
-$perPage = isset($_GET['perPage']) ? (int) $_GET['perPage'] : $defaultPerPage;
-if (!in_array($perPage, $allowedPerPage, true)) {
-    $perPage = $defaultPerPage;
-}
-
-// 序號排序方向：desc（預設，新到舊）／asc（舊到新）。點表頭切換。
-$sort = (isset($_GET['sort']) && $_GET['sort'] === 'asc') ? 'asc' : 'desc';
+$perPage = admin_resolve_page_size($conn, 'page_size_orders', $allowedPerPage);
+$sort = admin_resolve_sort();
 
 // 日期格式異常就退回預設值，避免帶進查詢造成錯誤
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) $from = date('Y-m-d', strtotime('-7 days'));
@@ -143,36 +127,11 @@ mysqli_stmt_execute($stmt);
 $refundedTotal = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['refunded'];
 mysqli_stmt_close($stmt);
 
-// 不含 page 的查詢字串，分頁連結與每頁筆數切換都以此為底加上各自的 page 值
-$qs = http_build_query(array(
-    'from' => $from, 'to' => $to, 'status' => $status, 'q' => $keyword,
-    'perPage' => $perPage, 'sort' => $sort,
-));
-
-/*
- * 換頁大小或換排序方向時一律跳回第 1 頁。
- *
- * 沿用原本的頁碼會對不上——換成每頁 100 筆時，原本第 3 頁（第 41-60 筆）
- * 在新的分頁方式下可能已經是全部資料的最後一頁之後，撈出來是空的，
- * 使用者會以為查詢壞了。
- */
-function admin_index_pager_url($baseQs, $page) {
-    return '?' . $baseQs . '&page=' . $page;
-}
-
-/** 分頁列，上下各放一份用的共用元件 */
-function render_pager($page, $totalPages, $qs) {
-    if ($totalPages <= 1) return;
-    echo '<div class="pager">';
-    if ($page > 1) {
-        echo '<a class="btn2" href="' . h(admin_index_pager_url($qs, $page - 1)) . '">上一頁</a>';
-    }
-    echo '<span class="muted">第 ' . $page . ' / ' . $totalPages . ' 頁</span>';
-    if ($page < $totalPages) {
-        echo '<a class="btn2" href="' . h(admin_index_pager_url($qs, $page + 1)) . '">下一頁</a>';
-    }
-    echo '</div>';
-}
+// 不分頁碼的篩選參數，給每頁筆數切換與排序表頭當底
+$baseParams = array('from' => $from, 'to' => $to, 'status' => $status,
+    'q' => $keyword, 'perPage' => $perPage, 'sort' => $sort);
+// 含 perPage/sort、不含 page 的查詢字串，分頁上一頁/下一頁連結用這個
+$qs = http_build_query($baseParams);
 
 admin_header('交易紀錄', 'index.php');
 ?>
@@ -233,19 +192,8 @@ admin_header('交易紀錄', 'index.php');
 
 <div class="card">
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-    <?php render_pager($page, $totalPages, $qs); ?>
-    <div style="display:flex;align-items:center;gap:8px">
-      <span class="muted" style="font-size:13px">每頁筆數</span>
-      <?php foreach ($allowedPerPage as $pp): ?>
-        <?php if ($pp === $perPage): ?>
-          <span class="btn2" style="background:#5a3d99;color:#fff;border-color:#5a3d99"><?= $pp ?></span>
-        <?php else: ?>
-          <a class="btn2" href="<?= h(admin_index_pager_url(
-              http_build_query(array('from' => $from, 'to' => $to, 'status' => $status,
-                  'q' => $keyword, 'perPage' => $pp, 'sort' => $sort)), 1)) ?>"><?= $pp ?></a>
-        <?php endif; ?>
-      <?php endforeach; ?>
-    </div>
+    <?php admin_render_pager($page, $totalPages, $qs); ?>
+    <?php admin_render_page_size_switcher($allowedPerPage, $perPage, $baseParams); ?>
   </div>
 </div>
 
@@ -253,14 +201,7 @@ admin_header('交易紀錄', 'index.php');
   <table>
     <thead>
       <tr>
-        <th>
-          <a href="<?= h(admin_index_pager_url(
-              http_build_query(array('from' => $from, 'to' => $to, 'status' => $status,
-                  'q' => $keyword, 'perPage' => $perPage, 'sort' => $sort === 'asc' ? 'desc' : 'asc')), 1)) ?>"
-             style="color:inherit;text-decoration:none">
-            序號 <?= $sort === 'asc' ? '▲' : '▼' ?>
-          </a>
-        </th>
+        <th><?php admin_sortable_header('序號', $sort, $baseParams); ?></th>
         <th>時間</th><th>訂單編號</th><th class="right">金額</th><th>狀態</th>
         <th>上游</th><th>卡號末四碼</th><th>授權碼</th><th>交易序號</th><th>訊息</th><th></th>
       </tr>
@@ -310,7 +251,7 @@ admin_header('交易紀錄', 'index.php');
 </div>
 
 <div class="card">
-  <?php render_pager($page, $totalPages, $qs); ?>
+  <?php admin_render_pager($page, $totalPages, $qs); ?>
 </div>
 
 <?php admin_footer(); ?>

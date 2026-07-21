@@ -310,16 +310,30 @@ function db_upsert_device($conn, $d) {
 }
 
 /** 列出所有登記過的裝置，附帶各自的交易統計 */
-function db_list_devices($conn) {
+/**
+ * @param int|null $limit  留 null 代表不分頁，回傳全部 —— 保留原本的行為，
+ *                         現有呼叫端（如果有的話）不會因為加這個參數而變動。
+ * @param string   $sort   'desc'（預設，最近使用優先）或 'asc'
+ */
+function db_list_devices($conn, $limit = null, $offset = 0, $sort = 'desc') {
+    $order = ($sort === 'asc') ? 'ASC' : 'DESC';
     $sql = "
         SELECT d.*,
                (SELECT COUNT(*) FROM orders o WHERE o.device_id = d.device_id) AS order_cnt,
                (SELECT COALESCE(SUM(o.amount),0) FROM orders o
                  WHERE o.device_id = d.device_id AND o.status='success') AS success_amt
-        FROM devices d ORDER BY d.last_seen DESC
+        FROM devices d ORDER BY d.last_seen $order
     ";
+    if ($limit !== null) {
+        $sql .= ' LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
+    }
     $res = mysqli_query($conn, $sql);
     return $res ? mysqli_fetch_all($res, MYSQLI_ASSOC) : array();
+}
+
+function db_count_devices($conn) {
+    $r = mysqli_query($conn, 'SELECT COUNT(*) c FROM devices');
+    return (int) mysqli_fetch_assoc($r)['c'];
 }
 
 /** 交易送出前先寫一筆 pending 紀錄，拿到 PAYUNi 回應後再更新 */
@@ -748,9 +762,14 @@ function db_count_staff($conn, $storeId) {
     return $c;
 }
 
-function db_list_staff($conn, $storeId) {
-    $stmt = mysqli_prepare($conn,
-        'SELECT * FROM store_staff WHERE store_id = ? ORDER BY staff_code');
+/** @param int|null $limit 留 null 代表不分頁，回傳這家店全部店員 */
+function db_list_staff($conn, $storeId, $limit = null, $offset = 0, $sort = 'asc') {
+    $order = ($sort === 'desc') ? 'DESC' : 'ASC';
+    $sql = "SELECT * FROM store_staff WHERE store_id = ? ORDER BY staff_code $order";
+    if ($limit !== null) {
+        $sql .= ' LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
+    }
+    $stmt = mysqli_prepare($conn, $sql);
     mysqli_stmt_bind_param($stmt, 'i', $storeId);
     mysqli_stmt_execute($stmt);
     $result = mysqli_stmt_get_result($stmt);
@@ -760,6 +779,15 @@ function db_list_staff($conn, $storeId) {
     }
     mysqli_stmt_close($stmt);
     return $rows;
+}
+
+function db_count_staff_in_store($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT COUNT(*) c FROM store_staff WHERE store_id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $c = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
+    mysqli_stmt_close($stmt);
+    return $c;
 }
 
 function db_find_staff($conn, $id) {
@@ -1052,9 +1080,20 @@ function db_list_pos_devices_by_merchant($conn, $merchantId) {
 
 // ── 經銷商 ──────────────────────────────────────────────────────
 
-function db_list_dealers($conn) {
-    $res = mysqli_query($conn, 'SELECT * FROM dealers ORDER BY id DESC');
+/** @param int|null $limit 留 null 代表不分頁 —— 下拉選單等用途需要完整清單 */
+function db_list_dealers($conn, $limit = null, $offset = 0, $sort = 'desc') {
+    $order = ($sort === 'asc') ? 'ASC' : 'DESC';
+    $sql = "SELECT * FROM dealers ORDER BY id $order";
+    if ($limit !== null) {
+        $sql .= ' LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
+    }
+    $res = mysqli_query($conn, $sql);
     return $res ? mysqli_fetch_all($res, MYSQLI_ASSOC) : array();
+}
+
+function db_count_dealers($conn) {
+    $r = mysqli_query($conn, 'SELECT COUNT(*) c FROM dealers');
+    return (int) mysqli_fetch_assoc($r)['c'];
 }
 
 function db_find_dealer($conn, $id) {
@@ -1111,17 +1150,36 @@ function db_count_merchants_by_dealer($conn, $dealerId) {
 
 // ── 客戶 ────────────────────────────────────────────────────────
 
-function db_list_merchants($conn, $dealerId = null) {
+/**
+ * @param int|null $dealerId 指定經銷商就只列該經銷商底下的客戶（不分頁 ——
+ *                           目前這個用法只在小範圍情境使用）
+ * @param int|null $limit    留 null 代表不分頁，回傳全部
+ */
+function db_list_merchants($conn, $dealerId = null, $limit = null, $offset = 0, $sort = 'desc') {
+    $order = ($sort === 'asc') ? 'ASC' : 'DESC';
     if ($dealerId === null) {
-        $res = mysqli_query($conn, 'SELECT * FROM merchants ORDER BY id DESC');
+        $sql = "SELECT * FROM merchants ORDER BY id $order";
+        if ($limit !== null) {
+            $sql .= ' LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
+        }
+        $res = mysqli_query($conn, $sql);
         return $res ? mysqli_fetch_all($res, MYSQLI_ASSOC) : array();
     }
-    $stmt = mysqli_prepare($conn, 'SELECT * FROM merchants WHERE dealer_id = ? ORDER BY id DESC');
+    $sql = "SELECT * FROM merchants WHERE dealer_id = ? ORDER BY id $order";
+    if ($limit !== null) {
+        $sql .= ' LIMIT ' . (int) $limit . ' OFFSET ' . (int) $offset;
+    }
+    $stmt = mysqli_prepare($conn, $sql);
     mysqli_stmt_bind_param($stmt, 'i', $dealerId);
     mysqli_stmt_execute($stmt);
     $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
     mysqli_stmt_close($stmt);
     return $rows;
+}
+
+function db_count_merchants($conn) {
+    $r = mysqli_query($conn, 'SELECT COUNT(*) c FROM merchants');
+    return (int) mysqli_fetch_assoc($r)['c'];
 }
 
 function db_find_merchant($conn, $id) {

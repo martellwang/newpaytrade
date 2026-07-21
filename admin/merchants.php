@@ -17,11 +17,18 @@ admin_require_login();
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../providers.php';
 require_once __DIR__ . '/layout.php';
+require_once __DIR__ . '/pagination.php';
 
 $conn = db_connect();
 db_create_merchants_table_if_not_exists($conn);
 db_create_store_staff_table_if_not_exists($conn);
 db_create_pos_locks_table_if_not_exists($conn);
+db_create_app_settings_table_if_not_exists($conn);
+
+$allowedPerPage = array(25, 50, 100);
+$perPage = admin_resolve_page_size($conn, 'page_size_merchants', $allowedPerPage);
+$sort = admin_resolve_sort();
+$page = max(1, (int) (isset($_GET['page']) ? $_GET['page'] : 1));
 
 $flash = null;
 $flashOk = false;
@@ -137,7 +144,14 @@ if (!empty($_SESSION['merchants_flash'])) {
 }
 
 $dealers = db_list_dealers($conn);
-$merchants = db_list_merchants($conn);
+$totalMerchants = db_count_merchants($conn);
+$totalPages = max(1, (int) ceil($totalMerchants / $perPage));
+$page = min($page, $totalPages);
+$merchants = db_list_merchants($conn, null, $perPage, ($page - 1) * $perPage, $sort);
+
+$baseParams = array('perPage' => $perPage, 'sort' => $sort);
+$qs = http_build_query($baseParams);
+
 $providers = provider_all();
 $editing = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editRow = $editing ? db_find_merchant($conn, $editing) : null;
@@ -175,18 +189,29 @@ admin_header('客戶管理', 'merchants.php');
   </div>
 </div>
 
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+    <?php admin_render_pager($page, $totalPages, $qs); ?>
+    <?php admin_render_page_size_switcher($allowedPerPage, $perPage, $baseParams); ?>
+  </div>
+</div>
+
 <div class="card wrap">
   <table>
     <thead>
-      <tr><th>客戶編號</th><th>名稱</th><th>經銷商</th><th>登入帳號</th>
+      <tr><th><?php admin_sortable_header('序號', $sort, $baseParams); ?></th>
+          <th>客戶編號</th><th>名稱</th><th>經銷商</th><th>登入帳號</th>
           <th>商店數</th><th>狀態</th><th>備註</th><th></th></tr>
     </thead>
     <tbody>
       <?php if (!$merchants): ?>
-        <tr><td colspan="8" class="muted">尚未建立任何客戶</td></tr>
+        <tr><td colspan="9" class="muted">尚未建立任何客戶</td></tr>
       <?php endif; ?>
+      <?php $seq = ($page - 1) * $perPage; ?>
       <?php foreach ($merchants as $m): ?>
+      <?php $seq++; ?>
       <tr>
+        <td class="muted"><?= $seq ?></td>
         <td><strong style="font-size:15px"><?= h($m['customer_code']) ?></strong></td>
         <td><?= h($m['name']) ?></td>
         <td class="muted"><?= h(isset($dealerNames[(int) $m['dealer_id']])
@@ -202,6 +227,10 @@ admin_header('客戶管理', 'merchants.php');
       <?php endforeach; ?>
     </tbody>
   </table>
+</div>
+
+<div class="card">
+  <?php admin_render_pager($page, $totalPages, $qs); ?>
 </div>
 
 <?php if ($isNew || $editRow): ?>

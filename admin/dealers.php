@@ -14,9 +14,16 @@ admin_require_login();
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../db.php';
 require_once __DIR__ . '/layout.php';
+require_once __DIR__ . '/pagination.php';
 
 $conn = db_connect();
 db_create_merchants_table_if_not_exists($conn);
+db_create_app_settings_table_if_not_exists($conn);
+
+$allowedPerPage = array(25, 50, 100);
+$perPage = admin_resolve_page_size($conn, 'page_size_dealers', $allowedPerPage);
+$sort = admin_resolve_sort();
+$page = max(1, (int) (isset($_GET['page']) ? $_GET['page'] : 1));
 
 $flash = null;
 $flashOk = false;
@@ -73,7 +80,14 @@ if (!empty($_SESSION['dealers_flash'])) {
     unset($_SESSION['dealers_flash']);
 }
 
-$dealers = db_list_dealers($conn);
+$totalDealers = db_count_dealers($conn);
+$totalPages = max(1, (int) ceil($totalDealers / $perPage));
+$page = min($page, $totalPages);
+$dealers = db_list_dealers($conn, $perPage, ($page - 1) * $perPage, $sort);
+
+$baseParams = array('perPage' => $perPage, 'sort' => $sort);
+$qs = http_build_query($baseParams);
+
 $editing = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editRow = $editing ? db_find_dealer($conn, $editing) : null;
 $isNew = isset($_GET['new']);
@@ -97,17 +111,28 @@ admin_header('經銷商', 'dealers.php');
   </div>
 </div>
 
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+    <?php admin_render_pager($page, $totalPages, $qs); ?>
+    <?php admin_render_page_size_switcher($allowedPerPage, $perPage, $baseParams); ?>
+  </div>
+</div>
+
 <div class="card wrap">
   <table>
     <thead>
-      <tr><th>名稱</th><th>登入帳號</th><th>狀態</th><th>旗下客戶</th><th>備註</th><th></th></tr>
+      <tr><th><?php admin_sortable_header('序號', $sort, $baseParams); ?></th>
+          <th>名稱</th><th>登入帳號</th><th>狀態</th><th>旗下客戶</th><th>備註</th><th></th></tr>
     </thead>
     <tbody>
       <?php if (!$dealers): ?>
-        <tr><td colspan="6" class="muted">尚未建立經銷商。請先建立一個，才能新增客戶。</td></tr>
+        <tr><td colspan="7" class="muted">尚未建立經銷商。請先建立一個，才能新增客戶。</td></tr>
       <?php endif; ?>
+      <?php $seq = ($page - 1) * $perPage; ?>
       <?php foreach ($dealers as $d): ?>
+      <?php $seq++; ?>
       <tr>
+        <td class="muted"><?= $seq ?></td>
         <td><strong><?= h($d['name']) ?></strong></td>
         <td><code><?= h($d['login_account']) ?></code></td>
         <td><?= (int) $d['enabled'] === 1
@@ -120,6 +145,10 @@ admin_header('經銷商', 'dealers.php');
       <?php endforeach; ?>
     </tbody>
   </table>
+</div>
+
+<div class="card">
+  <?php admin_render_pager($page, $totalPages, $qs); ?>
 </div>
 
 <?php if ($isNew || $editRow): ?>
