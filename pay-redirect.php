@@ -116,6 +116,8 @@ $encryptInfoParams = array(
     'TradeAmt' => (string) (int) $link['amount'],
     'Timestamp' => (string) time(),
     'ProdDesc' => '掃碼收款',
+    // 消費者信箱：UPP 沒有另外要求填買方資料的欄位，目前先固定帶店家信箱佔位
+    'UsrMail' => 'pay@newpay.com.tw',
     // 付款頁自己的倒數。範圍 60-600 秒，與我們連結的剩餘時間對齊 ——
     // 兩邊時間不一致的話，會出現「連結還沒過期但付款頁已經失效」的怪狀況。
     'TradeLExpireSec' => (string) $secondsLeft,

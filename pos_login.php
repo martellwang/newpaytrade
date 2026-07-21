@@ -36,6 +36,198 @@ function respond($statusCode, $body) {
     exit;
 }
 
+/** 把商店整理成 App 要的精簡格式（只給末四碼，完整 MerID 收銀機不需要） */
+function store_public_view($st) {
+    return array(
+        'id' => (int) $st['id'],
+        'name' => $st['name'],
+        'merIdMasked' => strlen($st['mer_id']) > 4
+            ? str_repeat('*', strlen($st['mer_id']) - 4) . substr($st['mer_id'], -4)
+            : $st['mer_id'],
+    );
+}
+
+/**
+ * 員工登入：商店代號 + 感應卡／工號 + PIN → 綁定機器並同時開班。
+ *
+ * ── 為什麼卡片/工號能開整台機器 ──────────────────────────────
+ *
+ * 這是刻意的設計選擇：讓一般員工不必知道店主的網站後台密碼，也能在交接班時
+ * 把機器開起來。代價是「卡片+PIN」在這條路上等同於一組機器層級的憑證，
+ * 信任邊界比較低 —— 但收銀機本來就放在店裡，攻擊者要試 PIN 得先實體接觸
+ * 機器，這個取捨在門市場景是可接受的。
+ *
+ * ── 商店怎麼決定 ──────────────────────────────────────────────
+ *
+ * 主路徑：**商店代號直接對應一家店**（store_code 唯一），不必選分店。
+ * 舊版相容：沒帶商店代號、改帶客戶編號時，退回舊的「靠卡/工號反推分店」邏輯
+ * （見 staff_login_by_customer）。
+ */
+function staff_login($conn, $storeCode, $customerCode, $staffCard, $staffCode, $pin, $deviceId, $storeId) {
+    $dummyHash = '$2y$10$usesomesillystringforsalttoavoidtimingleakabcdefghijklmn';
+
+    // ── 主路徑：商店代號 ──────────────────────────────────────────
+    if ($storeCode !== '') {
+        $store = db_find_store_by_code($conn, $storeCode);
+        if (!$store || (int) $store['enabled'] !== 1 || (int) $store['merchant_enabled'] !== 1) {
+            password_verify($pin, $dummyHash);   // 時間對齊
+            rl_record_failure($conn);
+            respond(200, array('status' => 'failed', 'message' => '商店代號、卡片／工號或 PIN 不正確'));
+        }
+
+        /*
+         * ── 資產綁定：機器只能登入被派到的客戶的店 ──────────────────
+         *
+         * 這台機器（依 deviceId）必須已被總部派給「這家店所屬的客戶」才能登入。
+         * 沒派工、或派給別的客戶（含只派到經銷商、還沒落到客戶），一律擋下。
+         * 這樣機器擺錯客戶就用不了，達到資產控管。
+         */
+        $device = db_find_device($conn, $deviceId);
+        $dispatchedMerchant = ($device && $device['dispatched_merchant_id'] !== null)
+            ? (int) $device['dispatched_merchant_id'] : 0;
+        if ($dispatchedMerchant !== (int) $store['merchant_id']) {
+            error_log("派工不符：device {$deviceId} 派給客戶 {$dispatchedMerchant}，"
+                . "但想登入客戶 {$store['merchant_id']} 的店 {$storeCode}");
+            respond(200, array(
+                'status' => 'failed',
+                'message' => '這台機器尚未派給這家店所屬的客戶，請聯絡總部派工',
+            ));
+        }
+
+        $staff = $staffCard !== ''
+            ? db_find_staff_by_card($conn, (int) $store['id'], $staffCard)
+            : db_find_staff_by_code($conn, (int) $store['id'], $staffCode);
+        if (!$staff || !password_verify($pin, $staff['pin_hash'])) {
+            if (!$staff) { password_verify($pin, $dummyHash); }
+            rl_record_failure($conn);
+            respond(200, array(
+                'status' => 'failed',
+                'message' => $staffCard !== '' ? '卡片或 PIN 不正確' : '工號或 PIN 不正確',
+            ));
+        }
+
+        db_reset_pos_login_failures($conn, $deviceId);
+        try {
+            $token = db_create_merchant_session($conn, (int) $store['merchant_id'], (int) $store['id'], $deviceId);
+            $session = db_find_session_by_token($conn, $token);
+            if (!$session) { throw new Exception('剛建立的 session 立即查不到'); }
+            db_start_shift($conn, (int) $session['session_id'], (int) $staff['id']);
+        } catch (Exception $e) {
+            error_log('員工登入建立 session 失敗：' . $e->getMessage());
+            respond(500, array('status' => 'failed', 'message' => '系統忙碌，請稍後再試'));
+        }
+        respond(200, array(
+            'status' => 'success',
+            'token' => $token,
+            'merchantName' => $store['merchant_name'],
+            'stores' => array(store_public_view($store)),
+            'needStoreSelection' => false,
+            'storeId' => (int) $store['id'],
+            'storeName' => $store['name'],
+            'staffName' => $staff['name'],
+        ));
+    }
+
+    // ── 舊版相容路徑：客戶編號 ────────────────────────────────────
+    staff_login_by_customer($conn, $customerCode, $staffCard, $staffCode, $pin, $deviceId, $storeId);
+}
+
+/** 舊版相容：客戶編號 + 卡/工號反推分店（新版 App 改用商店代號，見 staff_login）。 */
+function staff_login_by_customer($conn, $customerCode, $staffCard, $staffCode, $pin, $deviceId, $storeId) {
+    $dummyHash = '$2y$10$usesomesillystringforsalttoavoidtimingleakabcdefghijklmn';
+
+    $merchant = db_find_merchant_by_code($conn, $customerCode);
+    if (!$merchant || (int) $merchant['enabled'] !== 1) {
+        // 客戶不存在也跑一次假比對，讓回應時間跟 PIN 錯誤一致
+        password_verify($pin, $dummyHash);
+        rl_record_failure($conn);
+        respond(200, array('status' => 'failed', 'message' => '客戶編號、卡片／工號或 PIN 不正確'));
+    }
+
+    // 只在啟用中的分店裡找 —— 停用的分店不該能被登入
+    $candidates = array();
+    foreach (db_list_stores($conn, (int) $merchant['id']) as $st) {
+        if ((int) $st['enabled'] !== 1) continue;
+        if ($storeId > 0 && (int) $st['id'] !== $storeId) continue;
+        $staff = $staffCard !== ''
+            ? db_find_staff_by_card($conn, (int) $st['id'], $staffCard)
+            : db_find_staff_by_code($conn, (int) $st['id'], $staffCode);
+        if ($staff) {
+            $candidates[] = array('store' => $st, 'staff' => $staff);
+        }
+    }
+
+    // 用 PIN 過濾 —— 只有 PIN 對的分店才算數，藉此把「揭露分店」擋在驗證之後
+    $matched = array();
+    foreach ($candidates as $c) {
+        if (password_verify($pin, $c['staff']['pin_hash'])) {
+            $matched[] = $c;
+        }
+    }
+    if (empty($matched)) {
+        // 沒有任何候選時也要做一次比對，時間才跟「有候選但 PIN 錯」一致
+        if (empty($candidates)) { password_verify($pin, $dummyHash); }
+        rl_record_failure($conn);
+        respond(200, array(
+            'status' => 'failed',
+            'message' => $staffCard !== '' ? '卡片或 PIN 不正確' : '工號或 PIN 不正確',
+        ));
+    }
+
+    if (count($matched) > 1) {
+        // 同一張卡/工號登記在多家分店：讓 App 選一家後帶 storeId 再呼叫一次
+        $stores = array();
+        foreach ($matched as $c) { $stores[] = store_public_view($c['store']); }
+        respond(200, array(
+            'status' => 'success',
+            'needStoreSelection' => true,
+            'merchantName' => $merchant['name'],
+            'stores' => $stores,
+        ));
+    }
+
+    // 唯一一筆：綁定這家分店並直接開班
+    $store = $matched[0]['store'];
+    $staff = $matched[0]['staff'];
+
+    // 資產綁定：機器只能登入被派到的客戶的店（同商店代號路徑，這裡是舊版相容路徑）
+    $device = db_find_device($conn, $deviceId);
+    $dispatchedMerchant = ($device && $device['dispatched_merchant_id'] !== null)
+        ? (int) $device['dispatched_merchant_id'] : 0;
+    if ($dispatchedMerchant !== (int) $merchant['id']) {
+        respond(200, array(
+            'status' => 'failed',
+            'message' => '這台機器尚未派給這家店所屬的客戶，請聯絡總部派工',
+        ));
+    }
+
+    db_reset_pos_login_failures($conn, $deviceId);
+
+    try {
+        $token = db_create_merchant_session($conn, (int) $merchant['id'], (int) $store['id'], $deviceId);
+        // 員工登入即開班 —— 帶機器上線的人就是這一班在收款的人
+        $session = db_find_session_by_token($conn, $token);
+        if (!$session) {
+            throw new Exception('剛建立的 session 立即查不到');
+        }
+        db_start_shift($conn, (int) $session['session_id'], (int) $staff['id']);
+    } catch (Exception $e) {
+        error_log('員工登入建立 session 失敗：' . $e->getMessage());
+        respond(500, array('status' => 'failed', 'message' => '系統忙碌，請稍後再試'));
+    }
+
+    respond(200, array(
+        'status' => 'success',
+        'token' => $token,
+        'merchantName' => $merchant['name'],
+        'stores' => array(store_public_view($store)),
+        'needStoreSelection' => false,
+        'storeId' => (int) $store['id'],
+        'storeName' => $store['name'],
+        'staffName' => $staff['name'],
+    ));
+}
+
 $apiKey = isset($_SERVER['HTTP_X_API_KEY']) ? $_SERVER['HTTP_X_API_KEY'] : '';
 if ($apiKey === '' || $apiKey !== BACKEND_API_KEY) {
     respond(401, array('status' => 'failed', 'message' => 'unauthorized'));
@@ -57,14 +249,36 @@ $deviceId = isset($input['deviceId']) ? substr((string) $input['deviceId'], 0, 6
 // 客戶有多家分店時，App 第二次呼叫會帶上選好的分店
 $storeId = isset($input['storeId']) ? (int) $input['storeId'] : 0;
 
-if ($customerCode === '' || $account === '' || $password === '') {
+/*
+ * ── 兩種登入方式 ──────────────────────────────────────────────
+ *
+ *   商店密碼：客戶編號 + 帳號 + 密碼。裝機時由店主操作，綁定整台機器。
+ *   員工登入：客戶編號 + 感應卡／工號 + PIN。讓一般員工也能把機器開起來，
+ *            並在同一步直接開班（見下方 staff_login）。
+ *
+ * 用「有沒有帶 PIN 且帶了卡片或工號」判斷是不是員工登入 —— 兩條路的欄位
+ * 不重疊，不需要額外的模式參數。
+ */
+// 商店代號一律大寫比對（收銀機允許輸入小寫，這裡與 App 都會轉大寫）
+$storeCode = isset($input['storeCode']) ? strtoupper(trim((string) $input['storeCode'])) : '';
+$staffCard = isset($input['staffCard']) ? strtoupper(trim((string) $input['staffCard'])) : '';
+$staffCode = isset($input['staffCode']) ? trim((string) $input['staffCode']) : '';
+$pin = isset($input['pin']) ? (string) $input['pin'] : '';
+$isStaffLogin = ($pin !== '' && ($staffCard !== '' || $staffCode !== ''));
+
+if (!$isStaffLogin && ($customerCode === '' || $account === '' || $password === '')) {
     respond(400, array('status' => 'failed', 'message' => '請輸入客戶編號、帳號與密碼'));
+}
+// 員工登入要嘛帶商店代號（新版），要嘛帶客戶編號（舊版相容）
+if ($isStaffLogin && $storeCode === '' && $customerCode === '') {
+    respond(400, array('status' => 'failed', 'message' => '請輸入商店代號'));
 }
 
 try {
     $conn = db_connect();
     db_create_merchants_table_if_not_exists($conn);
     db_create_pos_locks_table_if_not_exists($conn);
+    db_create_store_staff_table_if_not_exists($conn);
 } catch (Exception $e) {
     error_log('登入：資料庫連線失敗：' . $e->getMessage());
     respond(500, array('status' => 'failed', 'message' => '系統忙碌，請稍後再試'));
@@ -74,7 +288,7 @@ try {
  * 設備鎖定檢查要在驗證帳密**之前**。
  *
  * 放在之後的話，被鎖住的設備仍然可以靠回應時間差異判斷密碼對不對 ——
- * 那等於鎖了個寂寞。
+ * 那等於鎖了個寂寞。員工登入一樣要看鎖定，否則就成了繞過鎖定的後門。
  */
 $lock = db_get_pos_lock($conn, $deviceId);
 if ($lock && (int) $lock['locked'] === 1) {
@@ -91,6 +305,11 @@ if ($rateLimitMessage !== null) {
     respond(429, array('status' => 'failed', 'message' => $rateLimitMessage));
 }
 rl_record_attempt($conn);
+
+if ($isStaffLogin) {
+    staff_login($conn, $storeCode, $customerCode, $staffCard, $staffCode, $pin, $deviceId, $storeId);
+    // staff_login 一定會 respond 後結束，不會回到這裡
+}
 
 $merchant = db_find_merchant_by_login($conn, $customerCode, $account);
 

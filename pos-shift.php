@@ -214,15 +214,20 @@ if ($action === 'enroll') {
                 'noPermission' => true,
             ));
         }
-    } elseif ($existingCount === 0) {
-        // 第一張卡：用商店登入密碼放行
+    } elseif (!db_has_enroll_capable_staff($conn, $identity['storeId'])) {
+        /*
+         * 用商店登入密碼放行的條件不是「一個店員都沒有」，而是「沒有任何
+         * 人現在刷卡開得了班、還有建檔權限」——後台可以預先建立店員資料
+         * （姓名、工號、PIN 都填了，卡片留白之後再補），這種情況一樣卡住，
+         * 跟真的一個店員都沒有是同一種處境，都要靠商店密碼解套。
+         */
         $merchant = db_find_merchant($conn, $identity['merchantId']);
         $authorized = $merchant && $storePassword !== ''
             && password_verify($storePassword, $merchant['password_hash']);
         if (!$authorized) {
             respond(403, array(
                 'status' => 'failed',
-                'message' => '這是第一張卡，請輸入收銀機登入用的商店密碼以確認身分。',
+                'message' => '目前沒有人能刷卡開班登記，請輸入收銀機登入用的商店密碼以確認身分。',
                 'needStorePassword' => true,
             ));
         }
@@ -234,8 +239,78 @@ if ($action === 'enroll') {
         ));
     }
 
-    // 這張卡已經給別人用了就擋下 —— 不然會有兩個人共用一張卡的身分
+    // 這張卡目前屬於誰（可能沒人）。實際要不要擋，得看接下來是綁給既有
+    // 店員還是新增一位 —— 「卡片已經是本人的」跟「被別人佔用」是兩回事。
     $dup = db_find_staff_by_card($conn, $identity['storeId'], $cardUid);
+
+    /*
+     * ── 工號已存在 → 這是「補發卡片給既有店員」，不是新增 ──────────
+     *
+     * 存在的原因：在後台建立的店員（或只用工號開班的人）身上沒有卡片，
+     * 而下面的 db_save_staff(id=0) 會因為工號重複而失敗 —— 收銀機這端
+     * 原本沒有任何辦法把卡片補綁上去，只能整個人重建。
+     *
+     * **要輸入該店員「現有的」PIN，不是設一組新的。** 綁卡等於把一張實體
+     * 卡片變成那個人的身分，讓本人在場輸入自己的 PIN 才合理；也避免授權者
+     * 順手把別人的 PIN、姓名或權限覆蓋掉（所以這裡只動 card_uid）。
+     */
+    $existing = ($staffCode !== '')
+        ? db_find_staff_by_code($conn, $identity['storeId'], $staffCode)
+        : null;
+
+    if ($existing) {
+        /*
+         * PIN 先驗。
+         *
+         * ⚠️ 卡片歸屬的檢查要放在 PIN **之後** —— 放前面的話，PIN 打錯時
+         *    收到的會是「這張卡已經登記給某某」，操作者完全不知道自己其實
+         *    是 PIN 打錯了（2026-07-21 實機就是這樣被誤導的）。
+         */
+        if (!password_verify($pin, $existing['pin_hash'])) {
+            respond(403, array(
+                'status' => 'failed',
+                'message' => 'PIN 不正確。要把這張卡綁給「' . $existing['name']
+                    . '」，請輸入他現有的 PIN。',
+            ));
+        }
+
+        // 卡片被「別人」佔用才是真的衝突
+        if ($dup && (int) $dup['id'] !== (int) $existing['id']) {
+            respond(400, array(
+                'status' => 'failed',
+                'message' => '這張卡已經登記給「' . $dup['name'] . '」，請先在後台解除綁定。',
+            ));
+        }
+
+        // 已經是本人的卡：目標狀態本來就達成了，不用改資料庫，也不該報錯
+        if ($dup && (int) $dup['id'] === (int) $existing['id']) {
+            respond(200, array(
+                'status' => 'success',
+                'name' => $existing['name'],
+                'staffCode' => $staffCode,
+                'bootstrap' => false,
+                'bound' => true,
+                'alreadyBound' => true,
+            ));
+        }
+
+        try {
+            db_set_staff_card($conn, (int) $existing['id'], $cardUid);
+        } catch (Exception $e) {
+            error_log('收銀機綁卡失敗：' . $e->getMessage());
+            respond(500, array('status' => 'failed', 'message' => '綁定失敗，請稍後再試'));
+        }
+        error_log("收銀機綁卡：商店 {$identity['storeId']} 卡片綁給 {$existing['name']}（{$staffCode}）");
+        respond(200, array(
+            'status' => 'success',
+            'name' => $existing['name'],
+            'staffCode' => $staffCode,
+            'bootstrap' => false,
+            'bound' => true,
+        ));
+    }
+
+    // 新增一位店員：卡片被任何人佔用都不行
     if ($dup) {
         respond(400, array(
             'status' => 'failed',

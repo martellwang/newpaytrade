@@ -1,0 +1,12 @@
+# 客戶登入後台。與 admin 分開的目錄、分開的 session。
+# 一樣白名單制：只放行要給人開的頁面，auth.php / layout.php 這種只被 include
+# 的檔案不對外開放。
+Options -Indexes
+
+<FilesMatch ".*">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "^(login|logout|index|report|stores|staff|devices|apk|download_apk|dealer)\.php$">
+    Require all granted
+</FilesMatch>

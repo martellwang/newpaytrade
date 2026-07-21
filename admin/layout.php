@@ -1,11 +1,13 @@
 <?php
 /** 管理介面共用的頁首／頁尾與樣式 */
 
+require_once __DIR__ . '/../brand.php';
+
 function admin_header($title, $active = '') {
     $nav = array(
         'index.php' => '交易紀錄',
         'report.php' => '對帳報表',
-        'devices.php' => '收銀機',
+        'devices.php' => '設備管理',
         'dealers.php' => '經銷商',
         'merchants.php' => '客戶管理',
         'merchant.php' => '商店狀態',
@@ -18,6 +20,8 @@ function admin_header($title, $active = '') {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="<?= NEWPAY_FAVICON ?>">
+<link rel="apple-touch-icon" href="<?= NEWPAY_FAVICON ?>">
 <title><?= h($title) ?> — 交易管理</title>
 <style>
 * { box-sizing: border-box; }
@@ -64,6 +68,21 @@ button { padding:8px 18px; border:0; border-radius:6px; background:#5a3d99;
 .muted { color:#888; font-size:13px; }
 .right { text-align:right; }
 .pager { display:flex; align-items:center; gap:12px; }
+
+/* ── 左右分欄版面（設備管理、系統設定用）──────────────────────
+ * 左邊固定寬的功能選單，右邊是內容。窄螢幕時上下堆疊。
+ * 這個管理平台是給桌機用的，小螢幕只求不破版、能捲。 */
+.split { display:flex; gap:18px; align-items:flex-start; }
+.split-nav { flex:0 0 200px; background:#fff; border-radius:10px; padding:10px;
+             box-shadow:0 1px 4px rgba(0,0,0,.06); }
+.split-body { flex:1; min-width:0; }   /* min-width:0 讓右欄的寬表格能自己捲，不撐破版面 */
+.split-nav .grp { font-size:12px; color:#999; padding:10px 10px 4px; font-weight:600; }
+.split-nav a { display:block; padding:9px 12px; border-radius:8px; text-decoration:none;
+               color:#333; font-size:14px; margin-bottom:2px; }
+.split-nav a:hover { background:#f3f0fb; }
+.split-nav a.on { background:#5a3d99; color:#fff; font-weight:600; }
+.split-nav a.sub { padding-left:22px; font-size:13px; }
+@media (max-width:760px){ .split{flex-direction:column} .split-nav{flex-basis:auto;width:100%} }
 </style>
 </head>
 <body>
@@ -93,6 +112,36 @@ function status_badge($status) {
     $labels = array('success' => '成功', 'failed' => '失敗', 'pending' => '處理中');
     $label = isset($labels[$status]) ? $labels[$status] : $status;
     return '<span class="badge s-' . h($status) . '">' . h($label) . '</span>';
+}
+
+/**
+ * 左右分欄的左側功能選單。
+ *
+ * $nodes 每一項可以是：
+ *   array('label'=>'POS機管理', 'key'=>'pos')        —— 可點的第一層項目
+ *   array('label'=>'顯示設定', 'children'=>array(     —— 第一層標題 + 可點的第二層
+ *       'page_size' => '清單預設每頁筆數'))
+ *
+ * 點選後以 ?section=<key> 帶回同一頁；$active 是目前選中的 key。
+ * $baseUrl 是目前頁面檔名（例如 'settings.php'），保留其他既有查詢參數由呼叫端處理。
+ */
+function admin_render_split_nav($nodes, $active, $baseUrl) {
+    echo '<nav class="split-nav">';
+    foreach ($nodes as $node) {
+        if (isset($node['key'])) {
+            $on = ($node['key'] === $active) ? ' on' : '';
+            echo '<a class="' . $on . '" href="' . h($baseUrl) . '?section=' . h(urlencode($node['key'])) . '">'
+                . h($node['label']) . '</a>';
+        } else {
+            echo '<div class="grp">' . h($node['label']) . '</div>';
+            foreach ($node['children'] as $key => $label) {
+                $on = ($key === $active) ? ' on' : '';
+                echo '<a class="sub' . $on . '" href="' . h($baseUrl) . '?section=' . h(urlencode($key)) . '">'
+                    . h($label) . '</a>';
+            }
+        }
+    }
+    echo '</nav>';
 }
 
 function money($n) {

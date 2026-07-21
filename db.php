@@ -111,12 +111,40 @@ function db_create_devices_table_if_not_exists($conn) {
         'serial_no' => "ALTER TABLE devices ADD COLUMN serial_no VARCHAR(64) NULL",
         'terminal_uid' => "ALTER TABLE devices ADD COLUMN terminal_uid VARCHAR(64) NULL",
         'name' => "ALTER TABLE devices ADD COLUMN name VARCHAR(64) NULL",
+        // 進倉登錄時間：由總部進倉人員用 App 的隱藏登錄操作寫入，代表這台
+        // 機器已進倉建檔（還沒派工、也還沒交易過）。t_id 就是 serial_no。
+        'enrolled_at' => "ALTER TABLE devices ADD COLUMN enrolled_at DATETIME NULL",
+        // 用哪張授權卡登錄的（稽核：知道是誰拿哪張卡進的倉）
+        'enrolled_card_uid' => "ALTER TABLE devices ADD COLUMN enrolled_card_uid VARCHAR(32) NULL",
+        // 派工：這台機器派給了哪個客戶或哪個經銷商（兩者只會有一個，或都空＝未派工）。
+        //   派給客戶 → 客戶自己決定用在哪家店
+        //   派給經銷商 → 經銷商自己決定派給旗下哪個客戶
+        'dispatched_merchant_id' => "ALTER TABLE devices ADD COLUMN dispatched_merchant_id INT NULL, ADD INDEX idx_disp_merchant (dispatched_merchant_id)",
+        'dispatched_dealer_id' => "ALTER TABLE devices ADD COLUMN dispatched_dealer_id INT NULL, ADD INDEX idx_disp_dealer (dispatched_dealer_id)",
+        'dispatched_at' => "ALTER TABLE devices ADD COLUMN dispatched_at DATETIME NULL",
     );
     foreach ($deviceCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM devices LIKE '$col'");
         if ($res && mysqli_num_rows($res) === 0) {
             mysqli_query($conn, $ddl);
         }
+    }
+
+    /*
+     * 進倉登錄授權卡：只有 UID 在這張表裡的 NFC 卡，才能在 App 隱藏入口
+     * （連點版本號 7 下）之後真正登錄設備。連點只是找入口，這張卡才是授權。
+     */
+    $sqlEnrollCard = "
+        CREATE TABLE IF NOT EXISTS enroll_cards (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            card_uid VARCHAR(32) NOT NULL,
+            note VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_enroll_card (card_uid)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sqlEnrollCard)) {
+        throw new Exception('建立 enroll_cards 資料表失敗：' . mysqli_error($conn));
     }
 
     // orders 加上 device_id 與 device_serial。
@@ -309,6 +337,107 @@ function db_upsert_device($conn, $d) {
     mysqli_stmt_close($stmt);
 }
 
+/**
+ * 進倉登錄：把裝置寫進 devices（沿用 db_upsert_device 的去重與欄位），
+ * 並蓋上 enrolled_at 時間戳，代表這台機器已由進倉人員建檔。
+ * 回傳這台機器最後在資料庫裡的 device_id（去重後可能沿用既有那筆的）。
+ */
+function db_enroll_device($conn, $d, $cardUid = '') {
+    db_upsert_device($conn, $d);
+    // db_upsert_device 可能因序號去重而沿用既有 device_id，這裡用序號回查最終那筆
+    $deviceId = $d['deviceId'];
+    if (!empty($d['serialNo'])) {
+        $stmt = mysqli_prepare($conn, 'SELECT device_id FROM devices WHERE serial_no = ? LIMIT 1');
+        mysqli_stmt_bind_param($stmt, 's', $d['serialNo']);
+        mysqli_stmt_execute($stmt);
+        $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+        mysqli_stmt_close($stmt);
+        if ($row) { $deviceId = $row['device_id']; }
+    }
+    // 記下進倉時間與「用哪張授權卡登錄的」（稽核）
+    $cardUid = strtoupper(trim((string) $cardUid));
+    $stmt = mysqli_prepare($conn,
+        'UPDATE devices SET enrolled_at = NOW(), enrolled_card_uid = ? WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 'ss', $cardUid, $deviceId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+    return $deviceId;
+}
+
+// ── 派工 ─────────────────────────────────────────────────────────
+
+/** 派給客戶（清掉經銷商指派，兩者互斥）。 */
+function db_dispatch_device_to_merchant($conn, $deviceId, $merchantId) {
+    $stmt = mysqli_prepare($conn,
+        'UPDATE devices SET dispatched_merchant_id = ?, dispatched_dealer_id = NULL, dispatched_at = NOW()
+         WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 'is', $merchantId, $deviceId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/** 派給經銷商（清掉客戶指派，兩者互斥）。 */
+function db_dispatch_device_to_dealer($conn, $deviceId, $dealerId) {
+    $stmt = mysqli_prepare($conn,
+        'UPDATE devices SET dispatched_dealer_id = ?, dispatched_merchant_id = NULL, dispatched_at = NOW()
+         WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 'is', $dealerId, $deviceId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/** 收回派工（回到未派工／可再派）。 */
+function db_recall_device($conn, $deviceId) {
+    $stmt = mysqli_prepare($conn,
+        'UPDATE devices SET dispatched_merchant_id = NULL, dispatched_dealer_id = NULL, dispatched_at = NULL
+         WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 's', $deviceId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+// ── 進倉登錄授權卡 ──────────────────────────────────────────────
+
+/** 這張卡的 UID 是不是授權的登錄卡（UID 一律大寫比對）。 */
+function db_is_enroll_card($conn, $cardUid) {
+    $cardUid = strtoupper(trim((string) $cardUid));
+    if ($cardUid === '') return false;
+    $stmt = mysqli_prepare($conn, 'SELECT 1 FROM enroll_cards WHERE card_uid = ? LIMIT 1');
+    mysqli_stmt_bind_param($stmt, 's', $cardUid);
+    mysqli_stmt_execute($stmt);
+    $ok = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt)) !== null;
+    mysqli_stmt_close($stmt);
+    return $ok;
+}
+
+function db_list_enroll_cards($conn) {
+    $r = mysqli_query($conn, 'SELECT id, card_uid, note, created_at FROM enroll_cards ORDER BY id');
+    return $r ? mysqli_fetch_all($r, MYSQLI_ASSOC) : array();
+}
+
+function db_add_enroll_card($conn, $cardUid, $note = '') {
+    $cardUid = strtoupper(trim((string) $cardUid));
+    if (!preg_match('/^[0-9A-F]{8,32}$/', $cardUid)) {
+        throw new Exception('卡片 UID 格式不正確（8～32 位 16 進位）');
+    }
+    if (db_is_enroll_card($conn, $cardUid)) {
+        throw new Exception("這張卡（{$cardUid}）已經是授權登錄卡");
+    }
+    $stmt = mysqli_prepare($conn, 'INSERT INTO enroll_cards (card_uid, note) VALUES (?,?)');
+    mysqli_stmt_bind_param($stmt, 'ss', $cardUid, $note);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('新增授權卡失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+function db_delete_enroll_card($conn, $id) {
+    $stmt = mysqli_prepare($conn, 'DELETE FROM enroll_cards WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
 /** 列出所有登記過的裝置，附帶各自的交易統計 */
 /**
  * @param int|null $limit  留 null 代表不分頁，回傳全部 —— 保留原本的行為，
@@ -321,7 +450,9 @@ function db_list_devices($conn, $limit = null, $offset = 0, $sort = 'desc') {
         SELECT d.*,
                (SELECT COUNT(*) FROM orders o WHERE o.device_id = d.device_id) AS order_cnt,
                (SELECT COALESCE(SUM(o.amount),0) FROM orders o
-                 WHERE o.device_id = d.device_id AND o.status='success') AS success_amt
+                 WHERE o.device_id = d.device_id AND o.status='success') AS success_amt,
+               (SELECT m.name FROM merchants m WHERE m.id = d.dispatched_merchant_id) AS dispatched_merchant_name,
+               (SELECT dl.name FROM dealers dl WHERE dl.id = d.dispatched_dealer_id) AS dispatched_dealer_name
         FROM devices d ORDER BY d.last_seen $order
     ";
     if ($limit !== null) {
@@ -413,6 +544,51 @@ function db_create_merchants_table_if_not_exists($conn) {
     }
 
     /*
+     * 多租戶客戶後台改版（2026-07-22）：
+     *
+     *   owner_merchant_id —— 這個經銷商由哪個「客戶」經營。客戶登入網站後台時，
+     *                        若有經銷商的 owner_merchant_id = 自己，就顯示
+     *                        「經銷商介面」。null = 純公司建立、沒有對應客戶。
+     */
+    $dealerCols = array(
+        'owner_merchant_id' => "ALTER TABLE dealers ADD COLUMN owner_merchant_id INT NULL,
+                                ADD INDEX idx_owner_merchant (owner_merchant_id)",
+    );
+    foreach ($dealerCols as $col => $ddl) {
+        $res = mysqli_query($conn, "SHOW COLUMNS FROM dealers LIKE '$col'");
+        if ($res && mysqli_num_rows($res) === 0) {
+            mysqli_query($conn, $ddl);
+        }
+    }
+
+    /*
+     * 經銷商前置碼。**一個經銷商可以有多個前置碼**，所以獨立一張表，不放
+     * 在 dealers 上。前置碼固定 4 個大寫英文字母（例如 ABCD），全系統唯一。
+     * 商店代號 = 前置碼 + 後綴（例如 ABCD001），所以看前 4 碼就知道商店
+     * 屬於哪個經銷商。收銀機輸入時允許小寫，App 端自動轉大寫。
+     */
+    $sqlPrefix = "
+        CREATE TABLE IF NOT EXISTS dealer_prefixes (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            dealer_id INT NOT NULL,
+            prefix CHAR(4) NOT NULL,
+            note VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_prefix (prefix),
+            INDEX idx_prefix_dealer (dealer_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ";
+    if (!mysqli_query($conn, $sqlPrefix)) {
+        throw new Exception('建立 dealer_prefixes 資料表失敗：' . mysqli_error($conn));
+    }
+
+    // 一次性清掉先前錯放在 dealers 上的單一 prefix 欄位（改為 dealer_prefixes 表）
+    $res = mysqli_query($conn, "SHOW COLUMNS FROM dealers LIKE 'prefix'");
+    if ($res && mysqli_num_rows($res) > 0) {
+        mysqli_query($conn, "ALTER TABLE dealers DROP COLUMN prefix");
+    }
+
+    /*
      * customer_code 是**系統配發的純數字客戶編號**，收銀機登入時輸入它。
      *
      * 為什麼不用統編／身分證字號當登入識別：
@@ -474,6 +650,34 @@ function db_create_merchants_table_if_not_exists($conn) {
     if (!mysqli_query($conn, $sql3)) {
         throw new Exception('建立 merchant_stores 資料表失敗：' . mysqli_error($conn));
     }
+
+    /*
+     * 多租戶客戶後台改版（2026-07-22）新增的欄位，逐一補上（重複執行不會出錯）：
+     *
+     *   store_code —— **本系統自己的商店代號**（不是 mer_id 那個上游 PAYUNi
+     *                 MerID）。收銀機登入輸入這個。格式：經銷商前置碼 + 後綴，
+     *                 例如 A001。全系統唯一。
+     *   dealer_id  —— 經銷商歸屬從客戶層搬到商店層：一個客戶可有多個商店代號，
+     *                 每個商店代號只對應一個經銷商。
+     */
+    $storeCols = array(
+        'store_code' => "ALTER TABLE merchant_stores ADD COLUMN store_code VARCHAR(16) NULL,
+                         ADD UNIQUE KEY uk_store_code (store_code)",
+        'dealer_id' => "ALTER TABLE merchant_stores ADD COLUMN dealer_id INT NULL,
+                        ADD INDEX idx_store_dealer (dealer_id)",
+    );
+    foreach ($storeCols as $col => $ddl) {
+        $res = mysqli_query($conn, "SHOW COLUMNS FROM merchant_stores LIKE '$col'");
+        if ($res && mysqli_num_rows($res) === 0) {
+            mysqli_query($conn, $ddl);
+        }
+    }
+    // 回填：商店的經銷商從所屬客戶繼承（只補還沒設的，重複執行安全）。
+    // store_code 不自動帶 —— 那要用經銷商前置碼，得由人指定。
+    mysqli_query($conn,
+        "UPDATE merchant_stores s JOIN merchants m ON m.id = s.merchant_id
+         SET s.dealer_id = m.dealer_id
+         WHERE s.dealer_id IS NULL AND m.dealer_id IS NOT NULL");
 
     /*
      * 收銀機登入憑證。
@@ -760,6 +964,26 @@ function db_count_staff($conn, $storeId) {
     $c = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
     mysqli_stmt_close($stmt);
     return $c;
+}
+
+/**
+ * 這家店有沒有「現在就能刷卡開班、且有建檔權限」的店員。
+ *
+ * 收銀機建檔的商店密碼放行條件本來只看「一個店員都沒有」，但後台可以
+ * 預先建立店員資料（例如先登記姓名、工號、PIN，卡片之後再補）——
+ * 這種店員存在，但沒有卡片就沒辦法刷卡開班，一樣會卡住，跟真的
+ * 一個店員都沒有是同一種處境。用這支取代單純的數量判斷。
+ */
+function db_has_enroll_capable_staff($conn, $storeId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT 1 FROM store_staff
+         WHERE store_id = ? AND active = 1 AND can_enroll = 1 AND card_uid IS NOT NULL
+         LIMIT 1');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $has = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt)) !== null;
+    mysqli_stmt_close($stmt);
+    return $has;
 }
 
 /** @param int|null $limit 留 null 代表不分頁，回傳這家店全部店員 */
@@ -1148,6 +1372,213 @@ function db_count_merchants_by_dealer($conn, $dealerId) {
     return $c;
 }
 
+// ── 經銷商 ↔ 客戶（誰經營這個經銷商）────────────────────────────
+
+/** 設定經銷商由哪個客戶經營（null = 沒有對應客戶，純公司建立）。 */
+function db_set_dealer_owner($conn, $dealerId, $merchantId) {
+    $mid = $merchantId ? (int) $merchantId : null;
+    $stmt = mysqli_prepare($conn, 'UPDATE dealers SET owner_merchant_id = ? WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'ii', $mid, $dealerId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/** 這個客戶經營了哪些經銷商（portal 用來判斷要不要顯示經銷商介面）。 */
+function db_find_dealers_by_owner($conn, $merchantId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT id, name FROM dealers WHERE owner_merchant_id = ? AND enabled = 1 ORDER BY id');
+    mysqli_stmt_bind_param($stmt, 'i', $merchantId);
+    mysqli_stmt_execute($stmt);
+    $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+/** 這個經銷商旗下的商店（依 merchant_stores.dealer_id），含所屬客戶名稱。 */
+function db_list_stores_by_dealer($conn, $dealerId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT s.*, m.name AS merchant_name, m.customer_code
+         FROM merchant_stores s JOIN merchants m ON m.id = s.merchant_id
+         WHERE s.dealer_id = ? ORDER BY s.store_code');
+    mysqli_stmt_bind_param($stmt, 'i', $dealerId);
+    mysqli_stmt_execute($stmt);
+    $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+/** 這個經銷商旗下所有商店的交易彙總（成功筆數/金額），可帶日期區間。 */
+function db_dealer_order_summary($conn, $dealerId, $from, $to) {
+    $stmt = mysqli_prepare($conn,
+        "SELECT COUNT(*) AS total_cnt,
+                SUM(o.status='success') AS success_cnt,
+                COALESCE(SUM(CASE WHEN o.status='success' THEN o.amount ELSE 0 END),0) AS success_amt
+         FROM orders o JOIN merchant_stores s ON s.id = o.store_id
+         WHERE s.dealer_id = ? AND o.created_at >= ? AND o.created_at < DATE_ADD(?, INTERVAL 1 DAY)");
+    mysqli_stmt_bind_param($stmt, 'iss', $dealerId, $from, $to);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
+}
+
+/** 派到這個經銷商、還沒再派給客戶的設備（dispatched_dealer_id = 該經銷商）。 */
+function db_list_devices_by_dealer($conn, $dealerId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT device_id, serial_no, brand, model, enrolled_at
+         FROM devices WHERE dispatched_dealer_id = ? ORDER BY enrolled_at DESC');
+    mysqli_stmt_bind_param($stmt, 'i', $dealerId);
+    mysqli_stmt_execute($stmt);
+    $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+/** 一台設備目前是不是派給這個經銷商（授權檢查用）。 */
+function db_device_is_dispatched_to_dealer($conn, $deviceId, $dealerId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT 1 FROM devices WHERE device_id = ? AND dispatched_dealer_id = ? LIMIT 1');
+    mysqli_stmt_bind_param($stmt, 'si', $deviceId, $dealerId);
+    mysqli_stmt_execute($stmt);
+    $ok = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt)) !== null;
+    mysqli_stmt_close($stmt);
+    return $ok;
+}
+
+/** 這個客戶是不是掛在這個經銷商底下（merchants.dealer_id）—— 再派工的授權檢查。 */
+function db_merchant_under_dealer($conn, $merchantId, $dealerId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT 1 FROM merchants WHERE id = ? AND dealer_id = ? LIMIT 1');
+    mysqli_stmt_bind_param($stmt, 'ii', $merchantId, $dealerId);
+    mysqli_stmt_execute($stmt);
+    $ok = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt)) !== null;
+    mysqli_stmt_close($stmt);
+    return $ok;
+}
+
+// ── 經銷商前置碼（一個經銷商可有多個，4 碼大寫英文，全系統唯一）─────
+
+/** 前置碼格式：正好 4 個大寫英文字母。輸入的小寫會被轉大寫。 */
+function db_normalize_prefix($prefix) {
+    return strtoupper(trim((string) $prefix));
+}
+function db_is_valid_prefix($prefix) {
+    return (bool) preg_match('/^[A-Z]{4}$/', $prefix);
+}
+
+function db_list_dealer_prefixes($conn, $dealerId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT id, dealer_id, prefix, note FROM dealer_prefixes WHERE dealer_id = ? ORDER BY prefix');
+    mysqli_stmt_bind_param($stmt, 'i', $dealerId);
+    mysqli_stmt_execute($stmt);
+    $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+/** 所有前置碼 + 所屬經銷商名稱，供商店表單的前置碼下拉用 */
+function db_list_all_prefixes($conn) {
+    $r = mysqli_query($conn,
+        'SELECT p.id, p.prefix, p.dealer_id, d.name AS dealer_name
+         FROM dealer_prefixes p JOIN dealers d ON d.id = p.dealer_id
+         ORDER BY p.prefix');
+    return mysqli_fetch_all($r, MYSQLI_ASSOC);
+}
+
+/** 用前置碼找出所屬經銷商，查無回 null */
+function db_find_prefix($conn, $prefix) {
+    $prefix = db_normalize_prefix($prefix);
+    $stmt = mysqli_prepare($conn, 'SELECT id, dealer_id, prefix FROM dealer_prefixes WHERE prefix = ?');
+    mysqli_stmt_bind_param($stmt, 's', $prefix);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+function db_add_dealer_prefix($conn, $dealerId, $prefix, $note = '') {
+    $prefix = db_normalize_prefix($prefix);
+    if (!db_is_valid_prefix($prefix)) {
+        throw new Exception('前置碼必須是 4 個英文字母');
+    }
+    if (db_find_prefix($conn, $prefix)) {
+        throw new Exception("前置碼「{$prefix}」已經被使用");
+    }
+    $stmt = mysqli_prepare($conn,
+        'INSERT INTO dealer_prefixes (dealer_id, prefix, note) VALUES (?,?,?)');
+    mysqli_stmt_bind_param($stmt, 'iss', $dealerId, $prefix, $note);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('新增前置碼失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 刪除前置碼。已有商店代號用到這個前置碼時擋下 —— 刪了會讓那些店對不到經銷商。 */
+function db_delete_dealer_prefix($conn, $id) {
+    $stmt = mysqli_prepare($conn, 'SELECT prefix FROM dealer_prefixes WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    if (!$row) return;
+
+    $like = $row['prefix'] . '%';
+    $stmt = mysqli_prepare($conn, 'SELECT COUNT(*) c FROM merchant_stores WHERE store_code LIKE ?');
+    mysqli_stmt_bind_param($stmt, 's', $like);
+    mysqli_stmt_execute($stmt);
+    $used = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
+    mysqli_stmt_close($stmt);
+    if ($used > 0) {
+        throw new Exception("前置碼「{$row['prefix']}」已有 {$used} 家商店在用，無法刪除");
+    }
+
+    $stmt = mysqli_prepare($conn, 'DELETE FROM dealer_prefixes WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/**
+ * 產生某前置碼底下的下一個商店代號（前置碼 + **6 碼**流水號，例如 NPAA000001）。
+ * 取該前置碼現有後綴的最大數值 +1（用 CAST 取數值，不受手動代號長短影響）。
+ */
+function db_next_store_code($conn, $prefix) {
+    $prefix = db_normalize_prefix($prefix);
+    $like = $prefix . '%';
+    // 前置碼固定 4 碼，所以後綴從第 5 個字元起
+    $stmt = mysqli_prepare($conn,
+        'SELECT MAX(CAST(SUBSTRING(store_code, 5) AS UNSIGNED)) AS m
+         FROM merchant_stores WHERE store_code LIKE ?');
+    mysqli_stmt_bind_param($stmt, 's', $like);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    $next = ($row && $row['m'] !== null) ? (int) $row['m'] + 1 : 1;
+    return $prefix . str_pad((string) $next, 6, '0', STR_PAD_LEFT);
+}
+
+/** 某前置碼底下有幾家商店（用來判斷前置碼能不能刪） */
+function db_count_stores_by_prefix($conn, $prefix) {
+    $like = db_normalize_prefix($prefix) . '%';
+    $stmt = mysqli_prepare($conn, 'SELECT COUNT(*) c FROM merchant_stores WHERE store_code LIKE ?');
+    mysqli_stmt_bind_param($stmt, 's', $like);
+    mysqli_stmt_execute($stmt);
+    $c = (int) mysqli_fetch_assoc(mysqli_stmt_get_result($stmt))['c'];
+    mysqli_stmt_close($stmt);
+    return $c;
+}
+
+/** 商店代號是否已被別家店用（排除自己） */
+function db_store_code_taken($conn, $storeCode, $exceptStoreId = 0) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT id FROM merchant_stores WHERE store_code = ? AND id <> ?');
+    mysqli_stmt_bind_param($stmt, 'si', $storeCode, $exceptStoreId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row !== null;
+}
+
 // ── 客戶 ────────────────────────────────────────────────────────
 
 /**
@@ -1195,6 +1626,22 @@ function db_find_merchant($conn, $id) {
 function db_find_merchant_by_login($conn, $customerCode, $account) {
     $stmt = mysqli_prepare($conn, 'SELECT * FROM merchants WHERE customer_code = ? AND login_account = ?');
     mysqli_stmt_bind_param($stmt, 'ss', $customerCode, $account);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+/**
+ * 員工登入用：只靠客戶編號定位客戶。
+ *
+ * 員工登入時手上只有卡片/工號 + PIN，沒有商店帳號，所以不能用
+ * db_find_merchant_by_login。customer_code 本身就有 UNIQUE 索引，
+ * 單獨拿它定位客戶是安全的（帳號只是同一客戶底下多帳號時才需要）。
+ */
+function db_find_merchant_by_code($conn, $customerCode) {
+    $stmt = mysqli_prepare($conn, 'SELECT * FROM merchants WHERE customer_code = ?');
+    mysqli_stmt_bind_param($stmt, 's', $customerCode);
     mysqli_stmt_execute($stmt);
     $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
     mysqli_stmt_close($stmt);
@@ -1266,15 +1713,61 @@ function db_find_store($conn, $id) {
     return $row ?: null;
 }
 
-function db_save_store($conn, $id, $merchantId, $name, $merId, $provider, $enabled, $note) {
+/**
+ * 用本系統商店代號找商店（收銀機登入用）。連帶帶出所屬客戶名稱與啟用狀態，
+ * 讓呼叫端一次判斷商店與客戶是否都啟用。查無回 null。商店代號一律大寫比對。
+ */
+function db_find_store_by_code($conn, $storeCode) {
+    $storeCode = strtoupper(trim((string) $storeCode));
+    if ($storeCode === '') return null;
+    $stmt = mysqli_prepare($conn,
+        'SELECT s.*, m.name AS merchant_name, m.enabled AS merchant_enabled
+         FROM merchant_stores s JOIN merchants m ON m.id = s.merchant_id
+         WHERE s.store_code = ?');
+    mysqli_stmt_bind_param($stmt, 's', $storeCode);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ?: null;
+}
+
+/**
+ * @param string $storeCode 本系統商店代號（前置碼+後綴）。dealer_id 由前置碼決定。
+ */
+function db_save_store($conn, $id, $merchantId, $name, $merId, $provider, $enabled, $note, $storeCode = '') {
+    $storeCode = db_normalize_prefix($storeCode); // 商店代號一律大寫存
+    $dealerId = null;
+    if ($storeCode !== '') {
+        // 格式：前置碼 4 個大寫字母 + 4~12 位數字（總長 8~16，塞得進 VARCHAR(16)）
+        if (!preg_match('/^[A-Z]{4}[0-9]{4,12}$/', $storeCode)) {
+            throw new Exception('商店代號格式錯誤：前置碼 4 個英文字母 + 4 到 12 位數字');
+        }
+        // 商店代號前 4 碼 = 前置碼 → 決定經銷商歸屬
+        $prefix = db_find_prefix($conn, substr($storeCode, 0, 4));
+        if (!$prefix) {
+            throw new Exception('商店代號的前 4 碼不是有效的經銷商前置碼');
+        }
+        if (db_store_code_taken($conn, $storeCode, $id)) {
+            throw new Exception("商店代號「{$storeCode}」已經被其他商店使用");
+        }
+        $dealerId = (int) $prefix['dealer_id'];
+    }
+
     if ($id) {
         $stmt = mysqli_prepare($conn,
-            'UPDATE merchant_stores SET name=?, mer_id=?, provider=?, enabled=?, note=? WHERE id=? AND merchant_id=?');
-        mysqli_stmt_bind_param($stmt, 'sssisii', $name, $merId, $provider, $enabled, $note, $id, $merchantId);
+            'UPDATE merchant_stores SET name=?, mer_id=?, provider=?, enabled=?, note=?, store_code=?, dealer_id=?
+             WHERE id=? AND merchant_id=?');
+        // store_code / dealer_id 允許為空（尚未指派）
+        $sc = ($storeCode === '') ? null : $storeCode;
+        mysqli_stmt_bind_param($stmt, 'sssissiii',
+            $name, $merId, $provider, $enabled, $note, $sc, $dealerId, $id, $merchantId);
     } else {
         $stmt = mysqli_prepare($conn,
-            'INSERT INTO merchant_stores (merchant_id, name, mer_id, provider, enabled, note) VALUES (?,?,?,?,?,?)');
-        mysqli_stmt_bind_param($stmt, 'isssis', $merchantId, $name, $merId, $provider, $enabled, $note);
+            'INSERT INTO merchant_stores (merchant_id, name, mer_id, provider, enabled, note, store_code, dealer_id)
+             VALUES (?,?,?,?,?,?,?,?)');
+        $sc = ($storeCode === '') ? null : $storeCode;
+        mysqli_stmt_bind_param($stmt, 'isssissi',
+            $merchantId, $name, $merId, $provider, $enabled, $note, $sc, $dealerId);
     }
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('儲存商店失敗：' . mysqli_stmt_error($stmt));

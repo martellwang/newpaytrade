@@ -94,10 +94,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($sName === '') { throw new Exception('請填寫商店名稱'); }
                 if ($merId === '') { throw new Exception('請填寫商店代號 MerID'); }
 
+                // 商店代號 = 前置碼 + 後綴。後綴留空 = 自動抓下一個流水號；
+                // 前置碼留空 = 不指派代號（db_save_store 收到空字串會存 null）。
+                $prefix = strtoupper(trim(isset($_POST['store_prefix']) ? $_POST['store_prefix'] : ''));
+                $suffix = trim(isset($_POST['store_suffix']) ? $_POST['store_suffix'] : '');
+                $storeCode = '';
+                if ($prefix !== '') {
+                    $storeCode = ($suffix !== '')
+                        ? $prefix . $suffix
+                        : db_next_store_code($conn, $prefix);
+                }
+
                 db_save_store($conn, $storeId, $merchantId, $sName, $merId,
                     trim(isset($_POST['provider']) ? $_POST['provider'] : 'payuni'),
                     isset($_POST['store_enabled']) ? 1 : 0,
-                    trim(isset($_POST['store_note']) ? $_POST['store_note'] : ''));
+                    trim(isset($_POST['store_note']) ? $_POST['store_note'] : ''),
+                    $storeCode);
 
                 $flashOk = true;
                 $flash = "已儲存商店「{$sName}」";
@@ -153,6 +165,7 @@ $baseParams = array('perPage' => $perPage, 'sort' => $sort);
 $qs = http_build_query($baseParams);
 
 $providers = provider_all();
+$allPrefixes = db_list_all_prefixes($conn);   // 商店表單的前置碼下拉用
 $editing = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editRow = $editing ? db_find_merchant($conn, $editing) : null;
 $isNew = isset($_GET['new']);
@@ -332,15 +345,18 @@ admin_header('客戶管理', 'merchants.php');
 
 <div class="card wrap">
   <table>
-    <thead><tr><th>商店名稱</th><th>商店代號 MerID</th><th>上游</th><th>狀態</th><th>交易筆數</th><th>店員</th><th>備註</th><th></th></tr></thead>
+    <thead><tr><th>商店名稱</th><th>商店代號<br><span class="muted" style="font-weight:400;font-size:11px">收銀機登入用</span></th><th>MerID<br><span class="muted" style="font-weight:400;font-size:11px">上游</span></th><th>上游</th><th>狀態</th><th>交易筆數</th><th>店員</th><th>備註</th><th></th></tr></thead>
     <tbody>
       <?php if (!$stores): ?>
-        <tr><td colspan="8" class="muted">尚未建立商店。沒有商店的話收銀機無法登入。</td></tr>
+        <tr><td colspan="9" class="muted">尚未建立商店。沒有商店的話收銀機無法登入。</td></tr>
       <?php endif; ?>
       <?php foreach ($stores as $st): ?>
       <tr>
         <td><strong><?= h($st['name']) ?></strong></td>
-        <td><?= h($st['mer_id']) ?></td>
+        <td><?php if (!empty($st['store_code'])): ?>
+              <strong style="letter-spacing:1px"><?= h($st['store_code']) ?></strong>
+            <?php else: ?><span class="badge s-pending">未指派</span><?php endif; ?></td>
+        <td class="muted"><?= h($st['mer_id']) ?></td>
         <td class="muted"><?= h($st['provider']) ?></td>
         <td><?= (int) $st['enabled'] === 1
               ? '<span class="badge s-success">啟用</span>'
@@ -371,10 +387,32 @@ admin_header('客戶管理', 'merchants.php');
         <input type="text" name="store_name" required style="width:100%;padding:8px"
                value="<?= h($editStore ? $editStore['name'] : '') ?>">
       </label>
-      <label>商店代號 MerID<br>
+      <label>MerID（上游商店代號）<br>
         <input type="text" name="mer_id" required style="width:100%;padding:8px"
                value="<?= h($editStore ? $editStore['mer_id'] : '') ?>">
-        <span class="muted" style="font-size:12px">上游核發給這家店的代號</span>
+        <span class="muted" style="font-size:12px">上游 PAYUNi 核發的代號，送金流用</span>
+      </label>
+      <?php
+        // 既有商店代號拆成前置碼(前4碼) + 後綴，供表單預選
+        $curCode = $editStore && !empty($editStore['store_code']) ? $editStore['store_code'] : '';
+        $curPrefix = $curCode !== '' ? substr($curCode, 0, 4) : '';
+        $curSuffix = $curCode !== '' ? substr($curCode, 4) : '';
+      ?>
+      <label>本系統商店代號 — 前置碼<br>
+        <select name="store_prefix" style="width:100%;padding:8px">
+          <option value="">（不指派）</option>
+          <?php foreach ($allPrefixes as $p): ?>
+            <option value="<?= h($p['prefix']) ?>" <?= $curPrefix === $p['prefix'] ? 'selected' : '' ?>>
+              <?= h($p['prefix']) ?> — <?= h($p['dealer_name']) ?></option>
+          <?php endforeach; ?>
+        </select>
+        <span class="muted" style="font-size:12px">選前置碼＝決定經銷商歸屬</span>
+      </label>
+      <label>商店代號 — 後綴（4～12 位數字）<br>
+        <input type="text" name="store_suffix" inputmode="numeric" pattern="[0-9]{4,12}"
+               minlength="4" maxlength="12" size="12" style="padding:8px"
+               value="<?= h($curSuffix) ?>" placeholder="留空 = 自動 6 位（例 000001）">
+        <span class="muted" style="font-size:12px">留空自動編 6 位；手動 4～12 位。例如 NPAA000001</span>
       </label>
       <label>上游<br>
         <select name="provider" style="width:100%;padding:8px">

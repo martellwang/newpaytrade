@@ -165,6 +165,17 @@ $wallets = array(
     'samsung' => 'Samsung Pay',
 );
 
+/*
+ * 測試用：QR 網址加 &only=apple 之類的參數時只顯示指定的錢包。
+ *
+ * 只會「縮減」選項，不會新增或改變付款金額/訂單內容，正常收銀機產生的
+ * QR 不會帶這個參數，不影響真實客人看到的畫面。
+ */
+$only = isset($_GET['only']) ? $_GET['only'] : '';
+if ($only !== '' && isset($wallets[$only])) {
+    $wallets = array($only => $wallets[$only]);
+}
+
 $buttons = '';
 foreach ($wallets as $key => $label) {
     $cls = ($key === $suggested) ? 'wallet suggested' : 'wallet';

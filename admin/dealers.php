@@ -32,6 +32,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!admin_verify_csrf(isset($_POST['csrf']) ? $_POST['csrf'] : '')) {
         $flash = '安全驗證失敗，請重新整理再試';
     } else {
+      $action = isset($_POST['action']) ? $_POST['action'] : 'save_dealer';
+
+      // ── 前置碼的新增／刪除，各自帶 action ──────────────────────
+      if ($action === 'add_prefix' || $action === 'delete_prefix') {
+        $dealerId = (int) (isset($_POST['dealer_id']) ? $_POST['dealer_id'] : 0);
+        try {
+            if ($action === 'add_prefix') {
+                db_add_dealer_prefix($conn, $dealerId,
+                    isset($_POST['prefix']) ? $_POST['prefix'] : '',
+                    trim(isset($_POST['prefix_note']) ? $_POST['prefix_note'] : ''));
+                $flashOk = true;
+                $flash = '已新增前置碼';
+            } else {
+                db_delete_dealer_prefix($conn, (int) $_POST['prefix_id']);
+                $flashOk = true;
+                $flash = '已刪除前置碼';
+            }
+        } catch (Exception $e) {
+            $flash = $e->getMessage();
+        }
+        $_SESSION['dealers_flash'] = array('ok' => $flashOk, 'msg' => $flash);
+        header('Location: dealers.php?edit=' . $dealerId);
+        exit;
+      }
+
         try {
             $id = isset($_POST['id']) && $_POST['id'] !== '' ? (int) $_POST['id'] : 0;
             $name = trim(isset($_POST['name']) ? $_POST['name'] : '');
@@ -60,8 +85,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new Exception("登入帳號「{$account}」已經被其他經銷商使用");
             }
 
-            db_save_dealer($conn, $id, $name, $account, $hash, $enabled,
+            $newDealerId = db_save_dealer($conn, $id, $name, $account, $hash, $enabled,
                 trim(isset($_POST['note']) ? $_POST['note'] : ''));
+
+            // 由哪個客戶經營（該客戶登入 portal 就會看到經銷商介面）。空 = 無。
+            db_set_dealer_owner($conn, $newDealerId,
+                (int) (isset($_POST['owner_merchant_id']) ? $_POST['owner_merchant_id'] : 0));
 
             $flashOk = true;
             $flash = "已儲存經銷商「{$name}」" . ($hash !== null ? '（密碼已更新）' : '');
@@ -91,6 +120,7 @@ $qs = http_build_query($baseParams);
 $editing = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editRow = $editing ? db_find_dealer($conn, $editing) : null;
 $isNew = isset($_GET['new']);
+$ownerMerchants = db_list_merchants($conn);   // 「由哪個客戶經營」下拉用
 
 admin_header('經銷商', 'dealers.php');
 ?>
@@ -178,6 +208,17 @@ admin_header('經銷商', 'dealers.php');
         <input type="text" name="note" style="width:100%;padding:8px"
                value="<?= h($editRow ? $editRow['note'] : '') ?>">
       </label>
+      <label>由哪個客戶經營<br>
+        <select name="owner_merchant_id" style="width:100%;padding:8px">
+          <option value="">（無 — 純公司建立）</option>
+          <?php foreach ($ownerMerchants as $om): ?>
+            <option value="<?= (int) $om['id'] ?>"
+              <?= ($editRow && (int) $editRow['owner_merchant_id'] === (int) $om['id']) ? 'selected' : '' ?>>
+              <?= h($om['customer_code'] . ' ' . $om['name']) ?></option>
+          <?php endforeach; ?>
+        </select>
+        <span class="muted" style="font-size:12px">這個客戶登入網站後台就會看到「經銷商介面」</span>
+      </label>
     </div>
     <label style="display:block;margin:14px 0">
       <input type="checkbox" name="enabled" value="1"
@@ -186,6 +227,67 @@ admin_header('經銷商', 'dealers.php');
     <button type="submit" style="background:#5a3d99;color:#fff;border:0;padding:10px 24px;
                                  border-radius:6px;cursor:pointer;font-size:15px">儲存</button>
     <a class="btn2" href="dealers.php" style="margin-left:8px">取消</a>
+  </form>
+</div>
+<?php endif; ?>
+
+<?php if ($editRow):
+  $prefixes = db_list_dealer_prefixes($conn, (int) $editRow['id']);
+?>
+<div class="card" style="border:1px solid #5a3d99">
+  <h3 style="margin-top:0;font-size:16px">商店代號前置碼</h3>
+  <div class="muted" style="margin-bottom:12px">
+    這個經銷商可以有<strong>多個</strong>前置碼（4 個大寫英文字母）。旗下商店的
+    商店代號 = <strong>前置碼 + 流水號</strong>（例如 <code>NPAA001</code>），
+    收銀機登入時輸入這個代號。
+  </div>
+
+  <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:14px">
+    <thead><tr style="text-align:left;color:#666;border-bottom:1px solid #eee">
+      <th style="padding:8px 6px">前置碼</th><th style="padding:8px 6px">備註</th>
+      <th style="padding:8px 6px">旗下商店數</th><th style="padding:8px 6px"></th>
+    </tr></thead>
+    <tbody>
+      <?php if (!$prefixes): ?>
+        <tr><td colspan="4" class="muted" style="padding:8px 6px">尚未設定前置碼。先加一個才能給商店配代號。</td></tr>
+      <?php endif; ?>
+      <?php foreach ($prefixes as $p):
+        $cnt = db_count_stores_by_prefix($conn, $p['prefix']);
+      ?>
+      <tr style="border-bottom:1px solid #f2f2f2">
+        <td style="padding:8px 6px"><strong style="font-size:15px;letter-spacing:1px"><?= h($p['prefix']) ?></strong></td>
+        <td style="padding:8px 6px;color:#666"><?= h($p['note'] ?: '') ?></td>
+        <td style="padding:8px 6px"><?= number_format($cnt) ?> 家</td>
+        <td style="padding:8px 6px">
+          <?php if ($cnt === 0): ?>
+          <form method="post" style="display:inline"
+                onsubmit="return confirm('確定刪除前置碼 <?= h($p['prefix']) ?>？');">
+            <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+            <input type="hidden" name="action" value="delete_prefix">
+            <input type="hidden" name="dealer_id" value="<?= (int) $editRow['id'] ?>">
+            <input type="hidden" name="prefix_id" value="<?= (int) $p['id'] ?>">
+            <button type="submit" style="background:#fff;color:#c62828;border:1px solid #c62828;
+                                         padding:4px 12px;border-radius:6px;cursor:pointer">刪除</button>
+          </form>
+          <?php else: ?>
+            <span class="muted" style="font-size:12px">有商店在用，不可刪</span>
+          <?php endif; ?>
+        </td>
+      </tr>
+      <?php endforeach; ?>
+    </tbody>
+  </table>
+
+  <form method="post" class="filters">
+    <input type="hidden" name="csrf" value="<?= h(admin_csrf_token()) ?>">
+    <input type="hidden" name="action" value="add_prefix">
+    <input type="hidden" name="dealer_id" value="<?= (int) $editRow['id'] ?>">
+    <div><label>新前置碼（4 個英文字母）</label>
+      <input type="text" name="prefix" required maxlength="4" pattern="[A-Za-z]{4}"
+             style="text-transform:uppercase;letter-spacing:2px" placeholder="NPAA"></div>
+    <div style="flex:1"><label>備註</label>
+      <input type="text" name="prefix_note" style="width:100%" placeholder="例如 北區"></div>
+    <div><button type="submit">新增前置碼</button></div>
   </form>
 </div>
 <?php endif; ?>

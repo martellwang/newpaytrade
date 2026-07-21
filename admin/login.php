@@ -19,11 +19,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 $csrf = admin_csrf_token();
+require_once __DIR__ . '/../brand.php';
 ?><!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="<?= NEWPAY_FAVICON ?>">
 <title>交易管理 — 登入</title>
 <style>
 body { font-family: -apple-system, "Noto Sans TC", "Microsoft JhengHei", sans-serif;
