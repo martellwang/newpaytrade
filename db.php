@@ -768,6 +768,9 @@ function db_create_merchants_table_if_not_exists($conn) {
         // 收銀機掃碼（退款 QR 等）時是否開啟相機照明燈。i9100 鏡頭旁有補光燈，
         // 開燈能加快辨識。預設開；燈光刺眼或環境明亮的店可關。
         'scan_torch' => "ALTER TABLE merchant_stores ADD COLUMN scan_torch TINYINT(1) NOT NULL DEFAULT 1",
+        // 心跳連不上後端時，卡機是否顯示「網路不穩」警示。預設開；只想開機、
+        // 不打算連網交易的持有人可關掉，免得一直跳警示。
+        'heartbeat_warn' => "ALTER TABLE merchant_stores ADD COLUMN heartbeat_warn TINYINT(1) NOT NULL DEFAULT 1",
     );
     foreach ($storeCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM merchant_stores LIKE '$col'");
@@ -1151,6 +1154,26 @@ function db_save_store_scan_torch($conn, $storeId, $enabled) {
     mysqli_stmt_bind_param($stmt, 'ii', $val, $storeId);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('儲存掃碼照明設定失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+// 心跳網路警示。預設開（查不到店也回 true）。
+function db_get_store_heartbeat_warn($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT heartbeat_warn FROM merchant_stores WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ? ((int) $row['heartbeat_warn'] === 1) : true;
+}
+
+function db_save_store_heartbeat_warn($conn, $storeId, $enabled) {
+    $val = $enabled ? 1 : 0;
+    $stmt = mysqli_prepare($conn, 'UPDATE merchant_stores SET heartbeat_warn = ? WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'ii', $val, $storeId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存心跳警示設定失敗：' . mysqli_stmt_error($stmt));
     }
     mysqli_stmt_close($stmt);
 }

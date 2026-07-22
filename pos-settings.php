@@ -37,11 +37,13 @@ try {
      * 不能因為 token 過期就整支失敗。
      */
     $scanTorch = null;
+    $heartbeatWarn = null;
     $posToken = isset($_SERVER['HTTP_X_POS_TOKEN']) ? $_SERVER['HTTP_X_POS_TOKEN'] : '';
     if ($posToken !== '') {
         $identity = pos_resolve_identity($posToken, false);
         if ($identity['ok'] && !empty($identity['storeId'])) {
             $scanTorch = db_get_store_scan_torch($conn, (int) $identity['storeId']);
+            $heartbeatWarn = db_get_store_heartbeat_warn($conn, (int) $identity['storeId']);
         }
     }
 } catch (Exception $e) {
@@ -59,5 +61,9 @@ $body = array(
 if ($scanTorch !== null) {
     // 掃碼（退款 QR 等）時是否開啟相機照明燈。預設開。
     $body['scanTorch'] = $scanTorch;
+}
+if ($heartbeatWarn !== null) {
+    // 心跳連不上時是否顯示「網路不穩」警示。預設開。
+    $body['heartbeatWarn'] = $heartbeatWarn;
 }
 respond(200, $body);

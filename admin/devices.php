@@ -171,7 +171,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // 預設進「總覽」（上帝視角：機隊統計），而不是一長串機器清單。
 $section = 'overview';
 if (isset($_REQUEST['section']) &&
-    in_array($_REQUEST['section'], array('overview', 'pos', 'device_models', 'enroll_cards'), true)) {
+    in_array($_REQUEST['section'], array('overview', 'pos', 'dispatch', 'device_models', 'enroll_cards'), true)) {
     $section = $_REQUEST['section'];
 }
 
@@ -195,7 +195,10 @@ $dispatchDealers = db_list_dealers($conn);
 // （例如標籤機、錢櫃）就在這裡多一個 node、右側多一段 render。
 $navNodes = array(
     array('label' => '總覽', 'key' => 'overview'),
-    array('label' => 'POS機管理', 'key' => 'pos'),
+    array('label' => 'POS機管理', 'children' => array(
+        'pos' => '機台清單',
+        'dispatch' => '派工作業',
+    )),
     array('label' => '設備型號', 'key' => 'device_models'),
     array('label' => '登錄授權卡', 'key' => 'enroll_cards'),
 );
@@ -276,6 +279,103 @@ foreach ($fleet as $fr) {
             </div>
             <span class="muted" style="font-size:12px"><?= $pct ?>%</span>
           </div>
+        </td>
+      </tr>
+      <?php endforeach; ?>
+    </tbody>
+  </table>
+</div>
+
+<?php elseif ($section === 'dispatch'): ?>
+
+<?php
+// 派工作業：把機台派給客戶或經銷商（互斥）。列出全部機台，未派工的排前面。
+$allDevices = db_list_devices($conn);
+usort($allDevices, function ($a, $b) {
+    $ad = (empty($a['dispatched_merchant_id']) && empty($a['dispatched_dealer_id'])) ? 0 : 1;
+    $bd = (empty($b['dispatched_merchant_id']) && empty($b['dispatched_dealer_id'])) ? 0 : 1;
+    return $ad - $bd;   // 未派工(0) 排前面
+});
+$undispatched = 0;
+foreach ($allDevices as $ad) {
+    if (empty($ad['dispatched_merchant_id']) && empty($ad['dispatched_dealer_id'])) $undispatched++;
+}
+?>
+<div class="card">
+  <h3 style="margin-top:0;font-size:16px">派工作業</h3>
+  <div class="muted">
+    把機台派給<strong>客戶</strong>（客戶自己決定用在旗下哪家店）或<strong>經銷商</strong>
+    （經銷商再派給旗下客戶），兩者互斥。目前 <strong><?= $undispatched ?></strong> 台尚未派工。
+  </div>
+</div>
+
+<div class="card wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>機台編號 / 名稱</th>
+        <th>廠牌 / 型號</th>
+        <th>序號 (UID)</th>
+        <th>目前派工</th>
+        <th>派工操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <?php if (!$allDevices): ?>
+        <tr><td colspan="5" class="muted">尚無登記機台。</td></tr>
+      <?php endif; ?>
+      <?php foreach ($allDevices as $d): ?>
+      <?php $isDispatched = !empty($d['dispatched_merchant_name']) || !empty($d['dispatched_dealer_name']); ?>
+      <tr>
+        <td>
+          <strong><?= h($d['terminal_uid'] ?: '—') ?></strong>
+          <?php if ($d['name']): ?><div class="muted"><?= h($d['name']) ?></div><?php endif; ?>
+        </td>
+        <td><strong><?= h($d['brand'] ?: $d['manufacturer'] ?: '—') ?></strong> <?= h($d['model'] ?: '') ?></td>
+        <td>
+          <?= h($d['serial_no'] ?: '—') ?>
+          <?php if (!empty($d['enrolled_at'])): ?><span class="badge s-success" style="margin-left:4px">已進倉</span><?php endif; ?>
+          <div class="muted" style="font-size:11px"><?= h($d['device_id']) ?></div>
+        </td>
+        <td>
+          <?php if (!empty($d['dispatched_merchant_name'])): ?>
+            <span class="badge s-success">客戶</span> <?= h($d['dispatched_merchant_name']) ?>
+          <?php elseif (!empty($d['dispatched_dealer_name'])): ?>
+            <span class="badge s-pending">經銷商</span> <?= h($d['dispatched_dealer_name']) ?>
+          <?php else: ?>
+            <span class="muted">未派工</span>
+          <?php endif; ?>
+        </td>
+        <td>
+          <form method="post" class="filters" style="align-items:center;gap:6px">
+            <input type="hidden" name="csrf" value="<?= h($csrf) ?>">
+            <input type="hidden" name="action" value="dispatch">
+            <input type="hidden" name="device_id" value="<?= h($d['device_id']) ?>">
+            <input type="hidden" name="section" value="dispatch">
+            <select name="merchant_id" onchange="if(this.value){this.form.dispatch_target.value='merchant';this.form.dealer_id.value='';}">
+              <option value="">派給客戶…</option>
+              <?php foreach ($dispatchMerchants as $m): ?>
+                <option value="<?= (int) $m['id'] ?>"><?= h($m['customer_code'] . ' ' . $m['name']) ?></option>
+              <?php endforeach; ?>
+            </select>
+            <select name="dealer_id" onchange="if(this.value){this.form.dispatch_target.value='dealer';this.form.merchant_id.value='';}">
+              <option value="">或派給經銷商…</option>
+              <?php foreach ($dispatchDealers as $dl): ?>
+                <option value="<?= (int) $dl['id'] ?>"><?= h($dl['name']) ?></option>
+              <?php endforeach; ?>
+            </select>
+            <input type="hidden" name="dispatch_target" value="">
+            <button type="submit">派工</button>
+          </form>
+          <?php if ($isDispatched): ?>
+          <form method="post" style="margin-top:6px">
+            <input type="hidden" name="csrf" value="<?= h($csrf) ?>">
+            <input type="hidden" name="action" value="recall">
+            <input type="hidden" name="device_id" value="<?= h($d['device_id']) ?>">
+            <input type="hidden" name="section" value="dispatch">
+            <button type="submit" class="btn2">收回派工</button>
+          </form>
+          <?php endif; ?>
         </td>
       </tr>
       <?php endforeach; ?>

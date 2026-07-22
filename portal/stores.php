@@ -34,10 +34,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $qr = isset($_POST['print_refund_qr']) && $_POST['print_refund_qr'] === '1';
             $scan = isset($_POST['print_scan_pay']) && $_POST['print_scan_pay'] === '1';
             $torch = isset($_POST['scan_torch']) && $_POST['scan_torch'] === '1';
+            $hbWarn = isset($_POST['heartbeat_warn']) && $_POST['heartbeat_warn'] === '1';
             db_save_store_print_merchant_copy($conn, $sid, $stub);
             db_save_store_print_refund_qr($conn, $sid, $qr);
             db_save_store_print_scan_pay($conn, $sid, $scan);
             db_save_store_scan_torch($conn, $sid, $torch);
+            db_save_store_heartbeat_warn($conn, $sid, $hbWarn);
             $flashOk = true; $flash = '已更新列印設定';
         } elseif (!isset($_FILES['logo']) || $_FILES['logo']['error'] !== UPLOAD_ERR_OK) {
             $flash = '請選擇要上傳的圖檔';
@@ -126,6 +128,7 @@ portal_header('商店與店員', 'stores.php');
     $printQr = db_get_store_print_refund_qr($conn, (int) $st['id']);
     $printScan = db_get_store_print_scan_pay($conn, (int) $st['id']);
     $scanTorch = db_get_store_scan_torch($conn, (int) $st['id']);
+    $hbWarn = db_get_store_heartbeat_warn($conn, (int) $st['id']);
   ?>
   <form method="post" style="margin-top:10px">
     <input type="hidden" name="csrf" value="<?= h(portal_csrf_token()) ?>">
@@ -162,6 +165,14 @@ portal_header('商店與店員', 'stores.php');
         掃碼時開啟<strong>照明燈</strong>
       </label>
       <span class="muted" style="font-size:12px">預設開。收銀機掃退款 QR 時打開鏡頭旁的補光燈，加快辨識；環境明亮可關。</span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;font-size:14px;margin-top:6px">
+      <label style="display:flex;gap:6px;align-items:center">
+        <input type="checkbox" name="heartbeat_warn" value="1" <?= $hbWarn ? 'checked' : '' ?>
+               onchange="this.form.submit()">
+        連不上網路時顯示<strong>網路不穩警示</strong>
+      </label>
+      <span class="muted" style="font-size:12px">預設開。只想開機、不打算連網交易的店可關掉，免得卡機一直跳警示。</span>
     </div>
   </form>
 
