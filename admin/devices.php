@@ -347,7 +347,8 @@ foreach ($allDevices as $ad) {
           <?php endif; ?>
         </td>
         <td>
-          <form method="post" class="filters" style="align-items:center;gap:6px">
+          <form method="post" class="filters" style="align-items:center;gap:6px"
+                <?php if ($isDispatched): ?>onsubmit="return confirm('這台已派工，改派會撤銷它目前的登入並要求重新綁定到新對象。確定改派？');"<?php endif; ?>>
             <input type="hidden" name="csrf" value="<?= h($csrf) ?>">
             <input type="hidden" name="action" value="dispatch">
             <input type="hidden" name="device_id" value="<?= h($d['device_id']) ?>">
@@ -368,7 +369,8 @@ foreach ($allDevices as $ad) {
             <button type="submit">派工</button>
           </form>
           <?php if ($isDispatched): ?>
-          <form method="post" style="margin-top:6px">
+          <form method="post" style="margin-top:6px"
+                onsubmit="return confirm('收回會撤銷這台目前的登入，機台將立刻無法營業（掉回登入頁）。確定收回？');">
             <input type="hidden" name="csrf" value="<?= h($csrf) ?>">
             <input type="hidden" name="action" value="recall">
             <input type="hidden" name="device_id" value="<?= h($d['device_id']) ?>">

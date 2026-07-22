@@ -387,32 +387,59 @@ function db_enroll_device($conn, $d, $cardUid = '') {
 
 /** 派給客戶（清掉經銷商指派，兩者互斥）。 */
 function db_dispatch_device_to_merchant($conn, $deviceId, $merchantId) {
+    // 先看舊歸屬：只有真的換了對象才撤登入，避免「改派給同一客戶」誤登出營業中的機台
+    $before = db_get_device_dispatch($conn, $deviceId);
     $stmt = mysqli_prepare($conn,
         'UPDATE devices SET dispatched_merchant_id = ?, dispatched_dealer_id = NULL, dispatched_at = NOW()
          WHERE device_id = ?');
     mysqli_stmt_bind_param($stmt, 'is', $merchantId, $deviceId);
     mysqli_stmt_execute($stmt);
     mysqli_stmt_close($stmt);
+    $changed = ($before['merchant_id'] !== (int) $merchantId) || $before['dealer_id'] !== null;
+    if ($changed) db_revoke_sessions_by_device($conn, $deviceId);
+}
+
+/** 讀一台機器目前的派工歸屬（merchant_id / dealer_id，未派工為 null）。 */
+function db_get_device_dispatch($conn, $deviceId) {
+    $stmt = mysqli_prepare($conn,
+        'SELECT dispatched_merchant_id, dispatched_dealer_id FROM devices WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 's', $deviceId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return array(
+        'merchant_id' => ($row && $row['dispatched_merchant_id'] !== null) ? (int) $row['dispatched_merchant_id'] : null,
+        'dealer_id' => ($row && $row['dispatched_dealer_id'] !== null) ? (int) $row['dispatched_dealer_id'] : null,
+    );
 }
 
 /** 派給經銷商（清掉客戶指派，兩者互斥）。 */
 function db_dispatch_device_to_dealer($conn, $deviceId, $dealerId) {
+    $before = db_get_device_dispatch($conn, $deviceId);
     $stmt = mysqli_prepare($conn,
         'UPDATE devices SET dispatched_dealer_id = ?, dispatched_merchant_id = NULL, dispatched_at = NOW()
          WHERE device_id = ?');
     mysqli_stmt_bind_param($stmt, 'is', $dealerId, $deviceId);
     mysqli_stmt_execute($stmt);
     mysqli_stmt_close($stmt);
+    // 換了對象（原本派給客戶，或派給別的經銷商）就撤登入 —— 落到客戶前機台不能登入
+    $changed = ($before['dealer_id'] !== (int) $dealerId) || $before['merchant_id'] !== null;
+    if ($changed) db_revoke_sessions_by_device($conn, $deviceId);
 }
 
 /** 收回派工（回到未派工／可再派）。 */
 function db_recall_device($conn, $deviceId) {
+    $before = db_get_device_dispatch($conn, $deviceId);
     $stmt = mysqli_prepare($conn,
         'UPDATE devices SET dispatched_merchant_id = NULL, dispatched_dealer_id = NULL, dispatched_at = NULL
          WHERE device_id = ?');
     mysqli_stmt_bind_param($stmt, 's', $deviceId);
     mysqli_stmt_execute($stmt);
     mysqli_stmt_close($stmt);
+    // 原本有派工才需要撤登入（收回 = 資產回總部，機台立刻無法再營業）
+    if ($before['merchant_id'] !== null || $before['dealer_id'] !== null) {
+        db_revoke_sessions_by_device($conn, $deviceId);
+    }
 }
 
 // ── 進倉登錄授權卡 ──────────────────────────────────────────────
@@ -2180,6 +2207,20 @@ function db_find_session_by_token($conn, $token) {
 function db_revoke_merchant_sessions($conn, $merchantId) {
     $stmt = mysqli_prepare($conn, 'DELETE FROM merchant_sessions WHERE merchant_id = ?');
     mysqli_stmt_bind_param($stmt, 'i', $merchantId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/**
+ * 撤銷某台機器的所有登入 session。
+ *
+ * 派工的資產控管關鍵：收回或改派後要立刻叫這個，否則機台仍能用舊 token
+ * 繼續營業（pos_resolve_identity 只驗 token、不重驗派工）。撤掉後機台下一次
+ * 請求就會查無 session → App 掉回登入頁，重新做資產綁定。
+ */
+function db_revoke_sessions_by_device($conn, $deviceId) {
+    $stmt = mysqli_prepare($conn, 'DELETE FROM merchant_sessions WHERE device_id = ?');
+    mysqli_stmt_bind_param($stmt, 's', $deviceId);
     mysqli_stmt_execute($stmt);
     mysqli_stmt_close($stmt);
 }
