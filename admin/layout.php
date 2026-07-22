@@ -3,7 +3,12 @@
 
 require_once __DIR__ . '/../brand.php';
 
-function admin_header($title, $active = '') {
+/**
+ * @param bool $ownSplit 這頁自己會建左右分欄（例如設備管理、系統設定有多個左欄
+ *   子項）就傳 true，header 不自動開分欄；否則 header 自動給一個「只放本頁自己」
+ *   的左欄框架（全站版面規範：每頁都有左欄；上方功能整併進左欄是之後的事）。
+ */
+function admin_header($title, $active = '', $ownSplit = false) {
     $nav = array(
         'index.php' => '交易紀錄',
         'report.php' => '對帳報表',
@@ -104,9 +109,22 @@ button { padding:8px 18px; border:0; border-radius:6px; background:#5a3d99;
 </header>
 <main>
 <?php
+    // 全站版面規範：每頁都有左欄。頁面沒自建分欄時，這裡自動給一個「只放本頁
+    // 自己」的左欄框架（之後再把上方功能整併進各左欄）。
+    $GLOBALS['__admin_split_open'] = false;
+    if (!$ownSplit) {
+        $label = isset($nav[$active]) ? $nav[$active] : $title;
+        echo '<div class="split"><nav class="split-nav">'
+           . '<a class="on" href="' . h($active) . '">' . h($label) . '</a>'
+           . '</nav><div class="split-body">';
+        $GLOBALS['__admin_split_open'] = true;
+    }
 }
 
 function admin_footer() {
+    if (!empty($GLOBALS['__admin_split_open'])) {
+        echo '</div></div>'; // 收 .split-body 與 .split
+    }
     ?>
 </main>
 </body>

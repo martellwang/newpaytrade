@@ -101,7 +101,7 @@ foreach ($lists as $key => $info) {
 }
 $timeServer = db_get_setting($conn, 'time_server', '');
 
-admin_header('系統設定', 'settings.php');
+admin_header('系統設定', 'settings.php', true);
 ?>
 
 <?php if ($flash): ?>

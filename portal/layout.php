@@ -3,7 +3,7 @@
 
 require_once __DIR__ . '/../brand.php';
 
-function portal_header($title, $active = '') {
+function portal_header($title, $active = '', $ownSplit = false) {
     // 客戶後台的選單 —— 公司內部功能（經銷商、客戶管理、上游、系統設定）一律不放
     $nav = array(
         'index.php'  => '交易紀錄',
@@ -99,9 +99,22 @@ button { padding:8px 18px; border:0; border-radius:6px; background:#00695c;
 </header>
 <main>
 <?php
+    // 全站版面規範：每頁都有左欄（與總後台一致）。頁面沒自建分欄時自動給
+    // 「只放本頁自己」的左欄框架。
+    $GLOBALS['__portal_split_open'] = false;
+    if (!$ownSplit) {
+        $label = isset($nav[$active]) ? $nav[$active] : $title;
+        echo '<div class="split"><nav class="split-nav">'
+           . '<a class="on" href="' . h($active) . '">' . h($label) . '</a>'
+           . '</nav><div class="split-body">';
+        $GLOBALS['__portal_split_open'] = true;
+    }
 }
 
 function portal_footer() {
+    if (!empty($GLOBALS['__portal_split_open'])) {
+        echo '</div></div>'; // 收 .split-body 與 .split
+    }
     ?>
 </main>
 </body>

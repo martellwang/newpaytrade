@@ -204,7 +204,7 @@ $navNodes = array(
 );
 $enrollCards = ($section === 'enroll_cards') ? db_list_enroll_cards($conn) : array();
 
-admin_header('設備管理', 'devices.php');
+admin_header('設備管理', 'devices.php', true);
 ?>
 
 <?php if ($msg): ?><div class="card" style="background:#e8f5e9"><?= h($msg) ?></div><?php endif; ?>
