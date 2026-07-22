@@ -200,6 +200,25 @@ function db_create_devices_table_if_not_exists($conn) {
          */
         'staff_id' => "ALTER TABLE orders ADD COLUMN staff_id INT NULL, ADD INDEX idx_staff (staff_id)",
         'staff_name' => "ALTER TABLE orders ADD COLUMN staff_name VARCHAR(64) NULL",
+        /*
+         * 發動這筆交易的來源 IP。POS 打到本主機時的 REMOTE_ADDR，
+         * 收單當下抓下來，並同時以 UserIP 參數送給 PAYUNi，讓兩邊記錄一致。
+         * 幕後授權是伺服器對伺服器，PAYUNi 本來只看得到我們主機 IP，
+         * 帶了才知道真正發動端是哪台 POS。
+         */
+        'user_ip' => "ALTER TABLE orders ADD COLUMN user_ip VARCHAR(45) NULL",
+        /*
+         * 卡號前六碼（BIN）與收單／發卡銀行代碼。消費者的刷卡簽單上必須
+         * 列出收單銀行，這兩個都是簽單與對帳的必要資訊。
+         * 從 PAYUNi 回應解密後的 Card6No / CardBank(或 AuthBank) 取得。
+         */
+        'card6_no' => "ALTER TABLE orders ADD COLUMN card6_no VARCHAR(6) NULL",
+        'card_bank' => "ALTER TABLE orders ADD COLUMN card_bank VARCHAR(8) NULL",
+        /*
+         * 收銀機自己的一組訂單編號（跟我們送 PAYUNi 的 MerTradeNo 不同）。
+         * 由 POS 端在發動交易時帶上來，方便門市用自己的單號對帳。
+         */
+        'store_order_no' => "ALTER TABLE orders ADD COLUMN store_order_no VARCHAR(64) NULL, ADD INDEX idx_store_order_no (store_order_no)",
     );
     foreach ($orderCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM orders LIKE '$col'");
@@ -665,6 +684,15 @@ function db_create_merchants_table_if_not_exists($conn) {
                          ADD UNIQUE KEY uk_store_code (store_code)",
         'dealer_id' => "ALTER TABLE merchant_stores ADD COLUMN dealer_id INT NULL,
                         ADD INDEX idx_store_dealer (dealer_id)",
+        // 列印簽單用的 logo，商店自己在客戶後台上傳。存 data URI（base64），
+        // 避開 .htaccess 白名單擋靜態檔的問題，也方便直接發給收銀機列印。
+        'logo' => "ALTER TABLE merchant_stores ADD COLUMN logo MEDIUMTEXT NULL",
+        // 是否列印「存根聯」（店家留存的那一聯）。預設印；商店可在客戶後台關掉。
+        // 「收執聯」（客人那聯）不在這裡設，由店員現場問客人要不要再決定。
+        'print_merchant_copy' => "ALTER TABLE merchant_stores ADD COLUMN print_merchant_copy TINYINT(1) NOT NULL DEFAULT 1",
+        // 收執聯下方是否印「掃碼退款 QR」。預設印；不喜歡現場退款、偏好由後台退的
+        // 商店可以關掉。
+        'print_refund_qr' => "ALTER TABLE merchant_stores ADD COLUMN print_refund_qr TINYINT(1) NOT NULL DEFAULT 1",
     );
     foreach ($storeCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM merchant_stores LIKE '$col'");
@@ -854,6 +882,160 @@ function db_set_setting($conn, $name, $value) {
     mysqli_stmt_bind_param($stmt, 'ss', $name, $value);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('儲存設定失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+// ── 列印簽單範本 ────────────────────────────────────────────────
+//
+// 範本 = 一組「行」，存成 JSON 放在 app_settings（key = receipt_template）。
+// 每一行：text（可含 {{參數}}）、size（small/normal/large/xlarge）、
+// bold（bool）、align（left/center/right）。
+// 收銀機列印時把 {{參數}} 換成該筆交易的值。原則上一行不混字級。
+
+/** 系統預設範本（還沒設定過時用這個）。 */
+function db_default_receipt_lines() {
+    return array(
+        array('text' => '{{storeName}}', 'size' => 'large', 'bold' => true, 'align' => 'center'),
+        array('text' => '{{copyLabel}}', 'size' => 'normal', 'bold' => true, 'align' => 'center'),
+        array('text' => '銷售憑證', 'size' => 'normal', 'bold' => false, 'align' => 'center'),
+        array('text' => '--------------------------------', 'size' => 'small', 'bold' => false, 'align' => 'center'),
+        array('text' => '交易時間：{{time}}', 'size' => 'normal', 'bold' => false, 'align' => 'left'),
+        // 商店訂單編號可能很長（商店代號+時間），拆成「標籤」＋「值單獨一列」，
+        // 值用小字左對齊，避免跟標籤擠在一起被切行。
+        array('text' => '商店訂單編號', 'size' => 'normal', 'bold' => false, 'align' => 'left'),
+        array('text' => '{{storeOrderNo}}', 'size' => 'small', 'bold' => false, 'align' => 'left'),
+        array('text' => '交易序號：{{payuniTradeNo}}', 'size' => 'small', 'bold' => false, 'align' => 'left'),
+        array('text' => '付款方式：{{paymentMethod}}', 'size' => 'normal', 'bold' => false, 'align' => 'left'),
+        array('text' => '卡號：{{card6No}}******{{card4No}}', 'size' => 'normal', 'bold' => false, 'align' => 'left'),
+        array('text' => '收單銀行：{{cardBank}}', 'size' => 'normal', 'bold' => false, 'align' => 'left'),
+        array('text' => '授權碼：{{authCode}}', 'size' => 'normal', 'bold' => false, 'align' => 'left'),
+        array('text' => '--------------------------------', 'size' => 'small', 'bold' => false, 'align' => 'center'),
+        array('text' => '金額 NT$ {{amount}}', 'size' => 'large', 'bold' => true, 'align' => 'center'),
+        array('text' => '感謝惠顧', 'size' => 'small', 'bold' => false, 'align' => 'center'),
+    );
+}
+
+/** 可用參數清單（後台編輯畫面顯示、也給前端替換用）。 */
+function db_receipt_placeholders() {
+    return array(
+        'copyLabel' => '聯別（存根聯／收執聯，列印時自動帶）',
+        'storeName' => '商店名稱',
+        'merchantName' => '會員（客戶）名稱',
+        'storeCode' => '本系統商店代號',
+        'time' => '交易時間',
+        'amount' => '金額（數字）',
+        'paymentMethod' => '付款方式（信用卡／Apple Pay…）',
+        'card6No' => '卡號前六碼',
+        'card4No' => '卡號末四碼',
+        'cardBank' => '收單銀行',
+        'authCode' => '授權碼',
+        'payuniTradeNo' => 'PAYUNi 交易序號',
+        'storeOrderNo' => '商店訂單編號',
+        'merTradeNo' => '系統訂單編號',
+        'provider' => '第三方支付',
+    );
+}
+
+/** 讀出範本行陣列（沒設定過回預設）。一律回傳乾淨、欄位齊全的陣列。 */
+function db_get_receipt_lines($conn) {
+    $raw = db_get_setting($conn, 'receipt_template', null);
+    $lines = $raw ? json_decode($raw, true) : null;
+    if (!is_array($lines) || !$lines) {
+        return db_default_receipt_lines();
+    }
+    $sizes = array('small', 'normal', 'large', 'xlarge');
+    $aligns = array('left', 'center', 'right');
+    $clean = array();
+    foreach ($lines as $ln) {
+        if (!is_array($ln)) continue;
+        $clean[] = array(
+            'text' => isset($ln['text']) ? (string) $ln['text'] : '',
+            'size' => (isset($ln['size']) && in_array($ln['size'], $sizes, true)) ? $ln['size'] : 'normal',
+            'bold' => !empty($ln['bold']),
+            'align' => (isset($ln['align']) && in_array($ln['align'], $aligns, true)) ? $ln['align'] : 'left',
+        );
+    }
+    return $clean ?: db_default_receipt_lines();
+}
+
+/** 存範本行陣列（會過濾成乾淨結構）。 */
+function db_save_receipt_lines($conn, $lines) {
+    $sizes = array('small', 'normal', 'large', 'xlarge');
+    $aligns = array('left', 'center', 'right');
+    $clean = array();
+    foreach ((array) $lines as $ln) {
+        if (!is_array($ln)) continue;
+        $text = isset($ln['text']) ? trim((string) $ln['text']) : '';
+        // 全空的行（沒文字）就跳過，避免存一堆空行
+        if ($text === '' && empty($ln['keep_empty'])) continue;
+        $clean[] = array(
+            'text' => mb_substr($text, 0, 120),
+            'size' => (isset($ln['size']) && in_array($ln['size'], $sizes, true)) ? $ln['size'] : 'normal',
+            'bold' => !empty($ln['bold']),
+            'align' => (isset($ln['align']) && in_array($ln['align'], $aligns, true)) ? $ln['align'] : 'left',
+        );
+    }
+    db_set_setting($conn, 'receipt_template', json_encode($clean, JSON_UNESCAPED_UNICODE));
+    return $clean;
+}
+
+/** 存／讀商店 logo（data URI）。 */
+function db_get_store_logo($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT logo FROM merchant_stores WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ? $row['logo'] : null;
+}
+
+function db_save_store_logo($conn, $storeId, $dataUri) {
+    $stmt = mysqli_prepare($conn, 'UPDATE merchant_stores SET logo = ? WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'si', $dataUri, $storeId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存商店 logo 失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 這家店要不要印「存根聯」（店家留存那聯）。預設 true。 */
+function db_get_store_print_merchant_copy($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT print_merchant_copy FROM merchant_stores WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    // 沒有資料就當預設「要印」
+    return $row ? ((int) $row['print_merchant_copy'] === 1) : true;
+}
+
+function db_save_store_print_merchant_copy($conn, $storeId, $enabled) {
+    $val = $enabled ? 1 : 0;
+    $stmt = mysqli_prepare($conn, 'UPDATE merchant_stores SET print_merchant_copy = ? WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'ii', $val, $storeId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存存根聯設定失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+/** 收執聯要不要印「掃碼退款 QR」。預設 true。 */
+function db_get_store_print_refund_qr($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT print_refund_qr FROM merchant_stores WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ? ((int) $row['print_refund_qr'] === 1) : true;
+}
+
+function db_save_store_print_refund_qr($conn, $storeId, $enabled) {
+    $val = $enabled ? 1 : 0;
+    $stmt = mysqli_prepare($conn, 'UPDATE merchant_stores SET print_refund_qr = ? WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'ii', $val, $storeId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存退款 QR 設定失敗：' . mysqli_stmt_error($stmt));
     }
     mysqli_stmt_close($stmt);
 }
@@ -1956,38 +2138,48 @@ function db_delete_provider($conn, $name) {
 function db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId = null, $deviceSerial = null,
                                  $cardInst = 1, $merchantId = null, $merId = null,
                                  $storeId = null, $dealerId = null, $paymentMethod = 'credit',
-                                 $staffId = null, $staffName = null) {
+                                 $staffId = null, $staffName = null, $userIp = null, $storeOrderNo = null) {
     $stmt = mysqli_prepare($conn,
         'INSERT INTO orders (mer_trade_no, amount, status, device_id, device_serial,
                              card_inst, merchant_id, mer_id, store_id, dealer_id, payment_method,
-                             staff_id, staff_name)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
+                             staff_id, staff_name, user_ip, store_order_no)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     $status = 'pending';
     // 型別字串要跟欄位順序一一對應：整數欄位是 i，其餘 s。
     // 之前 appVersion 就因為型別對錯位置，把 "0.1-dev" 靜默轉成 0。
-    mysqli_stmt_bind_param($stmt, 'sisssiisiisis', $merTradeNo, $amount, $status, $deviceId, $deviceSerial,
-        $cardInst, $merchantId, $merId, $storeId, $dealerId, $paymentMethod, $staffId, $staffName);
+    mysqli_stmt_bind_param($stmt, 'sisssiisiisisss', $merTradeNo, $amount, $status, $deviceId, $deviceSerial,
+        $cardInst, $merchantId, $merId, $storeId, $dealerId, $paymentMethod, $staffId, $staffName,
+        $userIp, $storeOrderNo);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('寫入訂單紀錄失敗：' . mysqli_stmt_error($stmt));
     }
     mysqli_stmt_close($stmt);
 }
 
-/** 收到 PAYUNi 回應後更新訂單狀態 */
-function db_update_order_result($conn, $merTradeNo, $status, $payuniTradeNo, $authCode, $card4No, $message, $rawResponse) {
+/**
+ * 收到 PAYUNi 回應後更新訂單狀態。
+ *
+ * $card6No / $cardBank 用 COALESCE 更新：只有帶值時才寫入，避免後續的
+ * pending→success 多段更新用 null 把已存的卡片資訊蓋掉。
+ */
+function db_update_order_result($conn, $merTradeNo, $status, $payuniTradeNo, $authCode, $card4No, $message, $rawResponse, $card6No = null, $cardBank = null) {
     $stmt = mysqli_prepare(
         $conn,
-        'UPDATE orders SET status = ?, payuni_trade_no = ?, auth_code = ?, card4_no = ?, message = ?, raw_response = ? WHERE mer_trade_no = ?'
+        'UPDATE orders SET status = ?, payuni_trade_no = ?, auth_code = ?, card4_no = ?, message = ?, raw_response = ?,
+                           card6_no = COALESCE(?, card6_no), card_bank = COALESCE(?, card_bank)
+         WHERE mer_trade_no = ?'
     );
     mysqli_stmt_bind_param(
         $stmt,
-        'sssssss',
+        'sssssssss',
         $status,
         $payuniTradeNo,
         $authCode,
         $card4No,
         $message,
         $rawResponse,
+        $card6No,
+        $cardBank,
         $merTradeNo
     );
     if (!mysqli_stmt_execute($stmt)) {
@@ -2112,6 +2304,57 @@ function db_find_order($conn, $merTradeNo) {
     $row = mysqli_fetch_assoc($result);
     mysqli_stmt_close($stmt);
     return $row;
+}
+
+/**
+ * 同一商店的「商店訂單編號」是否已被占用。
+ *
+ * 用於擋掉進銷存系統重複送同一張單號 —— 只擋**已成功或處理中**的，
+ * 若之前那筆是失敗的則放行（允許用同一單號重試）。
+ * 依商店（store_id）判定：每家店的進銷存各自編號，跨店不算重複。
+ *
+ * @return array|null 撞號的既有訂單（有的話），否則 null
+ */
+function db_find_active_order_by_store_order_no($conn, $storeId, $storeOrderNo) {
+    if ($storeOrderNo === null || $storeOrderNo === '' || $storeId === null) {
+        return null;
+    }
+    $stmt = mysqli_prepare(
+        $conn,
+        "SELECT mer_trade_no, status FROM orders
+         WHERE store_id = ? AND store_order_no = ? AND status IN ('success', 'pending')
+         ORDER BY id DESC LIMIT 1"
+    );
+    mysqli_stmt_bind_param($stmt, 'is', $storeId, $storeOrderNo);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
+}
+
+/**
+ * 當外部進銷存／店員都沒帶「商店訂單編號」時，用這台機器所屬商店的
+ * 商店代號 + Unix timestamp（10 碼）+ 2 碼亂數自動產生一組
+ * （例：NPAA000001178469288742，共 22 碼，只含英文與數字、無連字號）。
+ * —— 使用者 2026-07-22 指定：不要「-」、時間用 10 碼 Unix timestamp、亂數 2 碼。
+ *
+ * 用商店的 store_code（本系統商店代號，非上游 MerID）。取不到 store_code
+ * 的舊資料就退回用 mer_id 或 'POS'。尾碼 2 碼亂數避免同店同秒撞號。
+ */
+function db_auto_store_order_no($conn, $storeId) {
+    $prefix = 'POS';
+    if ($storeId !== null) {
+        $stmt = mysqli_prepare($conn, 'SELECT store_code, mer_id FROM merchant_stores WHERE id = ?');
+        mysqli_stmt_bind_param($stmt, 'i', $storeId);
+        mysqli_stmt_execute($stmt);
+        $s = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+        mysqli_stmt_close($stmt);
+        if ($s) {
+            $prefix = !empty($s['store_code']) ? $s['store_code']
+                    : (!empty($s['mer_id']) ? $s['mer_id'] : 'POS');
+        }
+    }
+    return $prefix . time() . sprintf('%02d', mt_rand(0, 99));
 }
 
 /**

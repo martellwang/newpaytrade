@@ -94,6 +94,26 @@ function portal_footer() {
 if (!function_exists('money')) {
     function money($n) { return 'NT$ ' . number_format((int) $n); }
 }
+
+/**
+ * 付款方式可讀標籤（與總後台 admin/layout.php 同一套邏輯）。
+ * wallet 底下的錢包種類只在 raw_response 的 AuthType：4=Apple、5=Google、6=Samsung。
+ */
+if (!function_exists('payment_method_label')) {
+    function payment_method_label($method, $raw = null) {
+        if ($method === 'wallet') {
+            $authType = '';
+            if ($raw) {
+                $j = json_decode($raw, true);
+                if (is_array($j) && isset($j['AuthType'])) $authType = (string) $j['AuthType'];
+            }
+            $wallets = array('4' => 'Apple Pay', '5' => 'Google Pay', '6' => 'Samsung Pay');
+            return isset($wallets[$authType]) ? $wallets[$authType] : '行動支付';
+        }
+        $labels = array('credit' => '信用卡', 'linepay' => 'LINE Pay', 'jkopay' => '街口支付', 'icash' => '愛金卡');
+        return isset($labels[$method]) ? $labels[$method] : ($method ?: '—');
+    }
+}
 function portal_status_badge($status) {
     $labels = array('success' => '成功', 'failed' => '失敗', 'pending' => '處理中');
     $label = isset($labels[$status]) ? $labels[$status] : $status;

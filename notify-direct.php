@@ -96,7 +96,10 @@ try {
         isset($detail['AuthCode']) ? $detail['AuthCode'] : null,
         isset($detail['Card4No']) ? $detail['Card4No'] : null,
         isset($detail['Message']) ? $detail['Message'] : null,
-        json_encode($detail, JSON_UNESCAPED_UNICODE)
+        json_encode($detail, JSON_UNESCAPED_UNICODE),
+        // 簽單／對帳必要：卡號前六碼與收單銀行
+        !empty($detail['Card6No']) ? $detail['Card6No'] : null,
+        !empty($detail['CardBank']) ? $detail['CardBank'] : (!empty($detail['AuthBank']) ? $detail['AuthBank'] : null)
     );
     error_log("背景通知更新訂單 {$merTradeNo}：{$order['status']} -> $status");
 

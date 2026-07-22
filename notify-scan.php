@@ -130,9 +130,13 @@ if ($order['status'] !== $localStatus) {
     try {
         db_update_order_result($conn, $merTradeNo, $localStatus,
             isset($record['TradeNo']) ? $record['TradeNo'] : $order['payuni_trade_no'],
-            null, null,
+            !empty($record['AuthCode']) ? $record['AuthCode'] : null,
+            !empty($record['Card4No']) ? $record['Card4No'] : null,
             isset($tradeStatusText[$tradeStatus]) ? $tradeStatusText[$tradeStatus] : null,
-            json_encode($record, JSON_UNESCAPED_UNICODE));
+            json_encode($record, JSON_UNESCAPED_UNICODE),
+            // 簽單／對帳必要：卡號前六碼與收單銀行
+            !empty($record['Card6No']) ? $record['Card6No'] : null,
+            !empty($record['CardBank']) ? $record['CardBank'] : (!empty($record['AuthBank']) ? $record['AuthBank'] : null));
         error_log("LINE Pay 背景通知補正訂單 {$merTradeNo}：{$order['status']} -> $localStatus");
     } catch (Exception $e) {
         error_log('LINE Pay 通知更新訂單失敗：' . $e->getMessage());

@@ -109,7 +109,9 @@ if (!$order) {
           一次付清
         <?php endif; ?>
       </td></tr>
-      <tr><th>上游</th><td><?= h(isset($order['provider']) ? $order['provider'] : 'payuni') ?></td></tr>
+      <tr><th>商店訂單編號</th><td><?= h($order['store_order_no'] ?: '—') ?></td></tr>
+      <tr><th>第三方支付</th><td><?= h(provider_label(isset($order['provider']) ? $order['provider'] : 'payuni')) ?></td></tr>
+      <tr><th>收單銀行</th><td><?= h(bank_name(isset($order['card_bank']) ? $order['card_bank'] : '')) ?></td></tr>
       <tr><th>已退款</th><td>
         <?= $refundedTotal > 0 ? h(money($refundedTotal)) : '—' ?>
         <?php if ($refundedTotal > 0): ?>
@@ -118,7 +120,18 @@ if (!$order) {
       </td></tr>
       <tr><th>PAYUNi 交易序號</th><td><?= h($order['payuni_trade_no'] ?: '—') ?></td></tr>
       <tr><th>授權碼</th><td><?= h($order['auth_code'] ?: '—') ?></td></tr>
-      <tr><th>卡號末四碼</th><td><?= h($order['card4_no'] ?: '—') ?></td></tr>
+      <tr><th>卡號</th><td>
+        <?php
+        $c6 = isset($order['card6_no']) ? $order['card6_no'] : '';
+        $c4 = isset($order['card4_no']) ? $order['card4_no'] : '';
+        if ($c6 || $c4) {
+            echo h(($c6 ?: '******') . ' •••••• ' . ($c4 ?: '****'));
+        } else {
+            echo '—';
+        }
+        ?>
+        <div class="muted" style="font-size:12px">前六碼 <?= h($c6 ?: '—') ?>／末四碼 <?= h($c4 ?: '—') ?></div>
+      </td></tr>
       <tr><th>訊息</th><td><?= h($order['message'] ?: '—') ?></td></tr>
       <tr><th>刷卡機</th><td>
         <?php
@@ -138,6 +151,7 @@ if (!$order) {
           <div class="muted" style="font-size:12px">序號 <?= h($order['device_serial']) ?></div>
         <?php endif; ?>
       </td></tr>
+      <tr><th>交易 IP</th><td><?= h($order['user_ip'] ?: '—') ?></td></tr>
       <tr><th>建立時間</th><td><?= h($order['created_at']) ?></td></tr>
       <tr><th>最後更新</th><td><?= h($order['updated_at']) ?></td></tr>
     </table>

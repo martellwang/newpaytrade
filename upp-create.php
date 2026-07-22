@@ -47,6 +47,19 @@ if ($input === null) {
 
 $merTradeNo = isset($input['merTradeNo']) ? $input['merTradeNo'] : '';
 $amount = isset($input['amount']) ? $input['amount'] : null;
+// 收銀機自己的訂單編號（POS 端更新後才會帶）；發動交易的來源 IP（建單的 POS）
+// 欄位規範：只接受英文與數字（1-64 碼），不符就明確擋下。
+$storeOrderNo = isset($input['storeOrderNo']) ? trim((string) $input['storeOrderNo']) : '';
+if ($storeOrderNo === '') {
+    $storeOrderNo = null;
+} elseif (!preg_match('/^[A-Za-z0-9]{1,64}$/', $storeOrderNo)) {
+    respond(400, array(
+        'status' => 'failed',
+        'code' => 'invalid_store_order_no',
+        'message' => '商店訂單編號只能是英文與數字（1-64 碼）',
+    ));
+}
+$userIp = function_exists('rl_client_ip') ? rl_client_ip() : (isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : null);
 
 $posToken = isset($_SERVER['HTTP_X_POS_TOKEN']) ? $_SERVER['HTTP_X_POS_TOKEN'] : '';
 $identity = pos_resolve_identity($posToken, false);
@@ -114,11 +127,28 @@ if ($device && $deviceId) {
     }
 }
 
+// 商店訂單編號去重：進銷存重送同一單號時擋下（只擋成功／處理中的）
+if ($storeOrderNo !== null && $storeOrderNo !== '') {
+    $dupe = db_find_active_order_by_store_order_no($conn, $identity['storeId'], $storeOrderNo);
+    if ($dupe) {
+        error_log("商店訂單編號重複：{$storeOrderNo}（店 {$identity['storeId']}），既有 {$dupe['mer_trade_no']}／{$dupe['status']}");
+        respond(200, array(
+            'status' => 'failed',
+            'code' => 'duplicate_store_order_no',
+            'message' => '訂單編號重複',
+        ));
+    }
+} else {
+    // 沒有外部／店員帶入 → 用商店代號 + 時間自動產生一組
+    $storeOrderNo = db_auto_store_order_no($conn, $identity['storeId']);
+}
+
 if (!$existing) {
     try {
         db_insert_pending_order($conn, $merTradeNo, $amount, $deviceId, $deviceSerial,
             1, $identity['merchantId'], $identity['merId'], $identity['storeId'],
-            $identity['dealerId'], 'wallet', $identity['staffId'], $identity['staffName']);
+            $identity['dealerId'], 'wallet', $identity['staffId'], $identity['staffName'],
+            $userIp, $storeOrderNo);
     } catch (Exception $e) {
         error_log('寫入行動支付 pending 訂單失敗：' . $e->getMessage());
         respond(500, array('status' => 'failed', 'message' => '系統忙碌中，請稍後再試'));
@@ -152,4 +182,5 @@ respond(200, array(
     // 收銀機把這串網址編成 QR 顯示
     'qrToken' => PUBLIC_BASE_URL . '/pay.php?t=' . $token,
     'expiresInSeconds' => PAYMENT_LINK_TTL,
+    'storeOrderNo' => $storeOrderNo,
 ));

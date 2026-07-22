@@ -12,6 +12,7 @@ function admin_header($title, $active = '') {
         'merchants.php' => '客戶管理',
         'merchant.php' => '商店狀態',
         'providers.php' => '上游管理',
+        'receipt.php' => '列印範本',
         'apk.php' => '安裝檔',
         'settings.php' => '系統設定',
     );
@@ -112,6 +113,66 @@ function status_badge($status) {
     $labels = array('success' => '成功', 'failed' => '失敗', 'pending' => '處理中');
     $label = isset($labels[$status]) ? $labels[$status] : $status;
     return '<span class="badge s-' . h($status) . '">' . h($label) . '</span>';
+}
+
+/**
+ * 付款方式的可讀標籤。
+ *
+ * orders.payment_method 只分 credit（信用卡）／wallet（行動支付錢包）。
+ * wallet 底下是哪一種錢包（Apple／Google／Samsung Pay），PAYUNi 沒有獨立欄位，
+ * 只在 raw_response 的 AuthType 帶回來：4=Apple、5=Google、6=Samsung Pay，
+ * 所以這裡從 raw_response 解析出來，解不出就顯示通稱「行動支付」。
+ *
+ * @param string      $method 付款方式（credit／wallet…）
+ * @param string|null $raw    orders.raw_response（用來細分錢包種類，可不帶）
+ */
+function payment_method_label($method, $raw = null) {
+    if ($method === 'wallet') {
+        $authType = '';
+        if ($raw) {
+            $j = json_decode($raw, true);
+            if (is_array($j) && isset($j['AuthType'])) {
+                $authType = (string) $j['AuthType'];
+            }
+        }
+        $wallets = array('4' => 'Apple Pay', '5' => 'Google Pay', '6' => 'Samsung Pay');
+        return isset($wallets[$authType]) ? $wallets[$authType] : '行動支付';
+    }
+    $labels = array(
+        'credit' => '信用卡',
+        'linepay' => 'LINE Pay',
+        'jkopay' => '街口支付',
+        'icash' => '愛金卡',
+    );
+    return isset($labels[$method]) ? $labels[$method] : ($method ?: '—');
+}
+
+/**
+ * 銀行代碼 → 中文行名（財金公司三碼代碼）。查不到就回原代碼。
+ * PAYUNi 回應的 CardBank／AuthBank 帶的是這組代碼。
+ */
+function bank_name($code) {
+    $code = trim((string) $code);
+    if ($code === '') return '—';
+    $map = array(
+        '004' => '臺灣銀行', '005' => '土地銀行', '006' => '合作金庫', '007' => '第一銀行',
+        '008' => '華南銀行', '009' => '彰化銀行', '011' => '上海商銀', '012' => '台北富邦',
+        '013' => '國泰世華', '016' => '高雄銀行', '017' => '兆豐銀行', '021' => '花旗（台灣）',
+        '048' => '王道銀行', '050' => '臺灣企銀', '052' => '渣打銀行', '053' => '台中銀行',
+        '054' => '京城銀行', '081' => '匯豐（台灣）', '103' => '新光銀行', '108' => '陽信銀行',
+        '118' => '板信銀行', '147' => '三信銀行', '700' => '中華郵政', '803' => '聯邦銀行',
+        '805' => '遠東商銀', '806' => '元大銀行', '807' => '永豐銀行', '808' => '玉山銀行',
+        '809' => '凱基銀行', '810' => '星展（台灣）', '812' => '台新銀行', '815' => '日盛銀行',
+        '816' => '安泰銀行', '822' => '中國信託',
+    );
+    return isset($map[$code]) ? $map[$code] . '（' . $code . '）' : $code;
+}
+
+/** 上游／第三方支付公司的顯示名稱。 */
+function provider_label($provider) {
+    $provider = $provider ?: 'payuni';
+    $map = array('payuni' => '統一金流 PAYUNi', 'linepay' => 'LINE Pay');
+    return isset($map[$provider]) ? $map[$provider] : $provider;
 }
 
 /**

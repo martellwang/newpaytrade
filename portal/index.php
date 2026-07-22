@@ -58,7 +58,7 @@ $offset = ($page - 1) * $perPage;
 
 // 當頁明細
 $sql = "SELECT mer_trade_no, amount, status, payment_method, card4_no, auth_code,
-               staff_name, created_at
+               staff_name, created_at, raw_response
         FROM orders WHERE $whereSql ORDER BY id DESC LIMIT ? OFFSET ?";
 $stmt = mysqli_prepare($conn, $sql);
 $typesL = $types . 'ii';
@@ -67,8 +67,6 @@ mysqli_stmt_bind_param($stmt, $typesL, ...$argsL);
 mysqli_stmt_execute($stmt);
 $rows = mysqli_fetch_all(mysqli_stmt_get_result($stmt), MYSQLI_ASSOC);
 mysqli_stmt_close($stmt);
-
-$methodText = array('credit' => '信用卡', 'wallet' => '行動支付', 'linepay' => 'LINE Pay');
 
 function portal_qs($over = array()) {
     $p = array_merge($_GET, $over);
@@ -116,7 +114,7 @@ portal_header('交易紀錄', 'index.php');
         <td class="muted"><?= h($r['created_at']) ?></td>
         <td><?= h($r['mer_trade_no']) ?></td>
         <td class="right"><?= h(money($r['amount'])) ?></td>
-        <td><?= h(isset($methodText[$r['payment_method']]) ? $methodText[$r['payment_method']] : $r['payment_method']) ?></td>
+        <td><?= h(payment_method_label($r['payment_method'], isset($r['raw_response']) ? $r['raw_response'] : null)) ?></td>
         <td><?= portal_status_badge($r['status']) ?></td>
         <td><?= h($r['card4_no'] ?: '—') ?></td>
         <td><?= h($r['auth_code'] ?: '—') ?></td>

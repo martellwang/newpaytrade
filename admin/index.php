@@ -25,7 +25,8 @@ if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) $from = date('Y-m-d', strtotime
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $to))   $to   = date('Y-m-d');
 
 // 全部用 prepared statement 綁定，不把使用者輸入拼進 SQL
-$where = array('created_at >= ?', 'created_at < DATE_ADD(?, INTERVAL 1 DAY)');
+// 加了別名 o（下面 JOIN merchants/merchant_stores），created_at 會歧義，要限定 o.
+$where = array('o.created_at >= ?', 'o.created_at < DATE_ADD(?, INTERVAL 1 DAY)');
 $types = 'ss';
 $args  = array($from, $to);
 
@@ -61,7 +62,7 @@ $stmt = mysqli_prepare(
             COALESCE(SUM(amount), 0) AS total_amount,
             COALESCE(SUM(CASE WHEN status = 'success' THEN amount ELSE 0 END), 0) AS success_amount,
             COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) AS success_count
-     FROM orders WHERE $whereSql"
+     FROM orders o WHERE $whereSql"
 );
 mysqli_stmt_bind_param($stmt, $types, ...$args);
 mysqli_stmt_execute($stmt);
@@ -75,12 +76,17 @@ $totalPages = max(1, (int) ceil($total / $perPage));
 $page = min($page, $totalPages);
 $offset = ($page - 1) * $perPage;
 
-$orderSql = ($sort === 'asc') ? 'id ASC' : 'id DESC';
+$orderSql = ($sort === 'asc') ? 'o.id ASC' : 'o.id DESC';
 $stmt = mysqli_prepare(
     $conn,
-    "SELECT id, mer_trade_no, amount, status, payuni_trade_no, auth_code, card4_no,
-            message, created_at, card_inst, provider
-     FROM orders WHERE $whereSql ORDER BY $orderSql LIMIT ? OFFSET ?"
+    "SELECT o.id, o.mer_trade_no, o.amount, o.status, o.payuni_trade_no, o.auth_code, o.card4_no,
+            o.card6_no, o.card_bank, o.user_ip, o.store_order_no,
+            o.message, o.created_at, o.card_inst, o.provider, o.payment_method, o.raw_response,
+            m.name AS merchant_name, m.customer_code, s.store_code, s.name AS store_name
+     FROM orders o
+     LEFT JOIN merchants m ON m.id = o.merchant_id
+     LEFT JOIN merchant_stores s ON s.id = o.store_id
+     WHERE $whereSql ORDER BY $orderSql LIMIT ? OFFSET ?"
 );
 mysqli_stmt_bind_param($stmt, $types . 'ii', ...array_merge($args, array($perPage, $offset)));
 mysqli_stmt_execute($stmt);
@@ -202,13 +208,13 @@ admin_header('交易紀錄', 'index.php');
     <thead>
       <tr>
         <th><?php admin_sortable_header('序號', $sort, $baseParams); ?></th>
-        <th>時間</th><th>訂單編號</th><th class="right">金額</th><th>狀態</th>
-        <th>上游</th><th>卡號末四碼</th><th>授權碼</th><th>交易序號</th><th>訊息</th><th></th>
+        <th>時間</th><th>訂單編號</th><th>會員</th><th>商店代號</th><th class="right">金額</th><th>狀態</th>
+        <th>付款方式</th><th>上游</th><th>卡號</th><th>收單銀行</th><th>授權碼</th><th>交易序號</th><th>交易IP</th><th>訊息</th><th></th>
       </tr>
     </thead>
     <tbody>
       <?php if (!$rows): ?>
-        <tr><td colspan="11" class="muted">這個區間沒有交易紀錄</td></tr>
+        <tr><td colspan="16" class="muted">這個區間沒有交易紀錄</td></tr>
       <?php endif; ?>
       <?php $seq = $offset; ?>
       <?php foreach ($rows as $r): ?>
@@ -216,7 +222,24 @@ admin_header('交易紀錄', 'index.php');
       <tr>
         <td class="muted"><?= $seq ?></td>
         <td><?= h($r['created_at']) ?></td>
-        <td><?= h($r['mer_trade_no']) ?></td>
+        <td>
+          <?= h($r['mer_trade_no']) ?>
+          <?php if (!empty($r['store_order_no'])): ?>
+            <div class="muted" style="font-size:12px">商店單號 <?= h($r['store_order_no']) ?></div>
+          <?php endif; ?>
+        </td>
+        <td>
+          <?= h($r['merchant_name'] ?: '—') ?>
+          <?php if (!empty($r['customer_code'])): ?>
+            <div class="muted" style="font-size:12px"><?= h($r['customer_code']) ?></div>
+          <?php endif; ?>
+        </td>
+        <td>
+          <strong style="letter-spacing:1px"><?= h($r['store_code'] ?: '—') ?></strong>
+          <?php if (!empty($r['store_name'])): ?>
+            <div class="muted" style="font-size:12px"><?= h($r['store_name']) ?></div>
+          <?php endif; ?>
+        </td>
         <td class="right">
           <?= h(money($r['amount'])) ?>
           <?php if (isset($r['card_inst']) && (int) $r['card_inst'] > 1): ?>
@@ -238,10 +261,16 @@ admin_header('交易紀錄', 'index.php');
             </div>
           <?php endif; ?>
         </td>
+        <td><?= h(payment_method_label(isset($r['payment_method']) ? $r['payment_method'] : '', isset($r['raw_response']) ? $r['raw_response'] : null)) ?></td>
         <td class="muted"><?= h(isset($r['provider']) ? $r['provider'] : 'payuni') ?></td>
-        <td><?= h($r['card4_no'] ?: '—') ?></td>
+        <td>
+          <?php $c6 = $r['card6_no'] ?? ''; $c4 = $r['card4_no'] ?? ''; ?>
+          <?= ($c6 || $c4) ? h(($c6 ?: '******') . '…' . ($c4 ?: '****')) : '—' ?>
+        </td>
+        <td><?= h(bank_name(isset($r['card_bank']) ? $r['card_bank'] : '')) ?></td>
         <td><?= h($r['auth_code'] ?: '—') ?></td>
         <td><?= h($r['payuni_trade_no'] ?: '—') ?></td>
+        <td class="muted"><?= h($r['user_ip'] ?: '—') ?></td>
         <td><?= h($r['message'] ?: '') ?></td>
         <td><a class="btn2" href="detail.php?merTradeNo=<?= h(urlencode($r['mer_trade_no'])) ?>">明細</a></td>
       </tr>

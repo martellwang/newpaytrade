@@ -11,6 +11,7 @@ require_once __DIR__ . '/payuni_crypto.php';
 require_once __DIR__ . '/payuni_error_codes.php';
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/rate_limit.php';
+require_once __DIR__ . '/refund_token.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -47,6 +48,22 @@ $cardNumber = isset($input['cardNumber']) ? $input['cardNumber'] : '';
 $expiryMonth = isset($input['expiryMonth']) ? $input['expiryMonth'] : '';
 $expiryYear = isset($input['expiryYear']) ? $input['expiryYear'] : '';
 $cvv = isset($input['cvv']) ? $input['cvv'] : '';
+// 收銀機自己的訂單編號（跟我們的 merTradeNo 不同）。POS 端更新後才會帶，
+// 現在沒帶就存 null，不影響交易。
+// 欄位規範：只接受英文與數字（1-64 碼）。不符就明確擋下，不靜默清洗 ——
+// 進銷存對接時編號被改動會對不上帳。
+$storeOrderNo = isset($input['storeOrderNo']) ? trim((string) $input['storeOrderNo']) : '';
+if ($storeOrderNo === '') {
+    $storeOrderNo = null;
+} elseif (!preg_match('/^[A-Za-z0-9]{1,64}$/', $storeOrderNo)) {
+    respond(400, array(
+        'status' => 'failed',
+        'code' => 'invalid_store_order_no',
+        'message' => '商店訂單編號只能是英文與數字（1-64 碼）',
+    ));
+}
+// 發動交易的來源 IP：POS 打到本主機時的 REMOTE_ADDR，存下來也送給 PAYUNi。
+$userIp = function_exists('rl_client_ip') ? rl_client_ip() : (isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : null);
 
 /*
  * ── 收銀機登入身分 ────────────────────────────────────────────────
@@ -194,6 +211,11 @@ if ($cardInst > 1) {
 }
 $encryptInfoParams['ProdDesc'] = $description !== '' ? $description : '商品訂單';
 $encryptInfoParams['NotifyURL'] = PUBLIC_BASE_URL . '/notify-direct.php';
+// 實際發動交易的來源 IP。幕後授權是伺服器對伺服器，不帶的話 PAYUNi 只看得到
+// 我們主機 IP；帶了 PAYUNi 記錄的 IP 才等於真正發動的 POS。空值就不帶。
+if ($userIp) {
+    $encryptInfoParams['UserIP'] = $userIp;
+}
 
 try {
     $encryptInfo = payuni_encrypt_trade_info($encryptInfoParams, PAYUNI_HASH_KEY, PAYUNI_HASH_IV);
@@ -263,10 +285,26 @@ if ($conn) {
         ));
     }
 
+    // 商店訂單編號去重：進銷存重送同一單號時擋下（只擋成功／處理中的）
+    if ($storeOrderNo !== null && $storeOrderNo !== '') {
+        $dupe = db_find_active_order_by_store_order_no($conn, $storeId, $storeOrderNo);
+        if ($dupe) {
+            error_log("商店訂單編號重複：{$storeOrderNo}（店 {$storeId}），既有 {$dupe['mer_trade_no']}／{$dupe['status']}");
+            respond(200, array(
+                'status' => 'failed',
+                'code' => 'duplicate_store_order_no',
+                'message' => '訂單編號重複',
+            ));
+        }
+    } else {
+        // 沒有外部／店員帶入 → 用商店代號 + 時間自動產生一組
+        $storeOrderNo = db_auto_store_order_no($conn, $storeId);
+    }
+
     try {
         db_insert_pending_order($conn, $merTradeNo, round($amount), $deviceId, $deviceSerial,
             $cardInst, $merchantId, $merIdForTrade, $storeId, $dealerId, 'credit',
-            $staffId, $staffName);
+            $staffId, $staffName, $userIp, $storeOrderNo);
     } catch (Exception $e) {
         error_log('寫入 pending 訂單失敗：' . $e->getMessage());
         // 資料庫寫入失敗不擋交易，continue，但要記 log 之後追查
@@ -387,9 +425,14 @@ if (isset($detail['Status']) && $detail['Status'] === 'SUCCESS' && isset($detail
     $payuniTradeNo = isset($detail['TradeNo']) ? $detail['TradeNo'] : null;
     $authCode = isset($detail['AuthCode']) ? $detail['AuthCode'] : null;
     $card4No = isset($detail['Card4No']) ? $detail['Card4No'] : null;
+    // 簽單／對帳必要：卡號前六碼與收單銀行。PAYUNi 回應欄位以 CardBank 為主，
+    // 部分文件寫 AuthBank，兩個都接。
+    $card6No = !empty($detail['Card6No']) ? $detail['Card6No'] : null;
+    $cardBank = !empty($detail['CardBank']) ? $detail['CardBank']
+              : (!empty($detail['AuthBank']) ? $detail['AuthBank'] : null);
     if ($conn) {
         try {
-            db_update_order_result($conn, $merTradeNo, 'success', $payuniTradeNo, $authCode, $card4No, null, $responseBody);
+            db_update_order_result($conn, $merTradeNo, 'success', $payuniTradeNo, $authCode, $card4No, null, $responseBody, $card6No, $cardBank);
         } catch (Exception $e) {
             error_log('更新成功訂單狀態失敗：' . $e->getMessage());
         }
@@ -399,6 +442,16 @@ if (isset($detail['Status']) && $detail['Status'] === 'SUCCESS' && isset($detail
         'payuniTradeNo' => $payuniTradeNo,
         'authCode' => $authCode,
         'card4No' => $card4No,
+        // 簽單列印用：卡號前六碼、收單銀行代碼、第三方支付。
+        // （App 端印在刷卡簽單上；收單銀行中文名 App 端或後續由代碼對照）
+        'card6No' => $card6No,
+        'cardBank' => $cardBank,
+        'provider' => 'payuni',
+        // 商店訂單編號（外部/店員帶入，或後端自動產生的商店代號+時間）
+        'storeOrderNo' => $storeOrderNo,
+        // 退款 QR 用的簽章 token，App 印在收執聯下方；掃碼即可快速退這筆。
+        // 綁 storeId，退款時會再比對掃碼收銀機與訂單所屬商店。
+        'refundToken' => ($storeId ? refund_token_make($merTradeNo, $storeId) : null),
     ));
 }
 
