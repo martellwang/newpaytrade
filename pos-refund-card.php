@@ -1,23 +1,26 @@
 <?php
 /**
- * 掃收執聯 QR → 快速退款。
+ * 感應同卡 → 退款（收執聯 QR 掃不出來時的補救路徑）。
  *
- * 收執聯下方印的 QR 是簽章 token（見 refund_token.php）。收銀機掃到後把 token
- * 送來這裡。兩步：
- *   1) 預設（不帶 confirm）：驗證 token + 商店歸屬，回傳訂單摘要供店員確認金額
+ * 情境：客人的收執聯破損／QR 掃不出來，無法走 pos-refund-scan.php。
+ * 有退款權限的人在收銀機「交易紀錄」找到那筆交易，請客人把卡交出來，
+ * 感應同一張卡；App 讀到卡號的前六碼＋末四碼送來這裡比對。
+ *
+ * 兩步（與 pos-refund-scan.php 同一套時序，方便 App 共用回應解析）：
+ *   1) 預設（不帶 confirm）：驗證權限＋商店歸屬＋卡號相符，回傳訂單摘要供確認
  *   2) confirm=true：確認後才真正退款（內部轉呼叫 refund.php，沿用所有退款規則）
  *
- * 「由該商店產出」的三重檢核：
- *   - token 的 HMAC 簽章有效（＝本系統產生，偽造不了）
- *   - token 內的 storeId == 掃碼收銀機登入的商店
- *   - 該訂單所屬的 store_id == 掃碼收銀機登入的商店
- * 三者任一不符就拒絕。退款權限（開班、canRefund）由 refund.php 再把關。
+ * 憑證是「卡在現場再感應一次」取代 QR。三重把關：
+ *   - 操作者具退款權限（開班＋canRefund）
+ *   - 訂單所屬 store_id == 掃碼收銀機登入的商店（不能跨店退）
+ *   - 感應到的卡號前六＋末四 == 該筆交易存的卡號（同一張卡）
+ * 全卡號基於 PCI 不落地，所以只能比對前六＋末四 —— 碰撞機率極低，
+ * 再加上「操作者有權限＋卡在現場」兩道，足以作為退款憑證。
  */
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/pos_auth.php';
-require_once __DIR__ . '/refund_token.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -39,8 +42,17 @@ $input = json_decode(file_get_contents('php://input'), true);
 if (!is_array($input)) {
     respond(400, array('status' => 'failed', 'message' => '請求格式不是合法的 JSON'));
 }
-$token = isset($input['token']) ? (string) $input['token'] : '';
+$merTradeNo = isset($input['merTradeNo']) ? (string) $input['merTradeNo'] : '';
+$card6 = isset($input['card6']) ? preg_replace('/\D/', '', (string) $input['card6']) : '';
+$last4 = isset($input['last4']) ? preg_replace('/\D/', '', (string) $input['last4']) : '';
 $confirm = !empty($input['confirm']);
+
+if ($merTradeNo === '') {
+    respond(400, array('status' => 'failed', 'message' => '缺少 merTradeNo'));
+}
+if (strlen($card6) !== 6 || strlen($last4) !== 4) {
+    respond(400, array('status' => 'failed', 'message' => '卡號資料不完整，請重新感應卡片'));
+}
 
 // 1) 掃碼收銀機的登入身分（要知道它登入哪家店）
 $posToken = isset($_SERVER['HTTP_X_POS_TOKEN']) ? $_SERVER['HTTP_X_POS_TOKEN'] : '';
@@ -50,12 +62,7 @@ if (!$identity['ok']) {
 }
 $scanStoreId = (int) $identity['storeId'];
 
-// 1.5) 退款權限前置把關。
-//
-// 退款權限是「操作者能不能退款」的前提，跟掃到哪張 QR 無關，所以放在最前面：
-// 沒權限的話，掃碼後（verify 階段）就立刻回報，不要讓店員看完訂單摘要、
-// 按了「確認退款」才被 refund.php 擋下白忙一場。
-// 訊息與旗標與 refund.php 一致，App 端呈現方式相同。
+// 1.5) 退款權限前置把關（訊息與旗標與 refund.php／pos-refund-scan.php 一致）
 if (!$identity['staffId']) {
     respond(403, array(
         'status' => 'failed',
@@ -71,27 +78,13 @@ if (!$identity['canRefund']) {
     ));
 }
 
-// 2) 驗證 QR token 的簽章
-$v = refund_token_verify($token);
-if (!$v['ok']) {
-    respond(400, array('status' => 'failed', 'message' => $v['error']));
-}
-
-// 3) token 的 storeId 必須等於掃碼收銀機登入的店
-if ((int) $v['storeId'] !== $scanStoreId) {
-    respond(403, array(
-        'status' => 'failed',
-        'message' => '這張收執聯不是這家店開出的，無法在此退款',
-    ));
-}
-
 $conn = db_connect();
-$order = db_find_order($conn, $v['merTradeNo']);
+$order = db_find_order($conn, $merTradeNo);
 if (!$order) {
     respond(404, array('status' => 'failed', 'message' => '找不到這筆交易'));
 }
 
-// 4) 訂單所屬商店也必須等於掃碼收銀機的店（防跨店退款）
+// 2) 訂單所屬商店必須等於收銀機登入的店（防跨店退款）
 if ((int) $order['store_id'] !== $scanStoreId) {
     respond(403, array(
         'status' => 'failed',
@@ -99,11 +92,29 @@ if ((int) $order['store_id'] !== $scanStoreId) {
     ));
 }
 
+// 3) 感應到的卡號必須與這筆交易的卡相符（前六＋末四）
+$orderCard6 = isset($order['card6_no']) ? preg_replace('/\D/', '', (string) $order['card6_no']) : '';
+$orderCard4 = isset($order['card4_no']) ? preg_replace('/\D/', '', (string) $order['card4_no']) : '';
+if ($orderCard6 === '' || $orderCard4 === '') {
+    // 沒存卡號的交易（例如掃碼收款）無法用感應卡比對
+    respond(422, array(
+        'status' => 'failed',
+        'message' => '這筆交易沒有可比對的卡號，無法用感應卡退款',
+    ));
+}
+if (!hash_equals($orderCard6, $card6) || !hash_equals($orderCard4, $last4)) {
+    respond(200, array(
+        'status' => 'failed',
+        'message' => '感應的卡片與這筆交易不符，請確認是同一張卡',
+        'cardMismatch' => true,
+    ));
+}
+
 $amount = (int) $order['amount'];
-$refunded = db_sum_refunded_amount($conn, $v['merTradeNo']);
+$refunded = db_sum_refunded_amount($conn, $merTradeNo);
 $remaining = $amount - $refunded;
 
-// ── 第一步：只回摘要，讓店員先確認金額，不動錢 ──
+// ── 第一步：卡號相符，只回摘要讓店員確認金額，不動錢 ──
 if (!$confirm) {
     respond(200, array(
         'status' => 'success',
@@ -127,7 +138,7 @@ if (!$confirm) {
 $ch = curl_init(PUBLIC_BASE_URL . '/refund.php');
 curl_setopt_array($ch, array(
     CURLOPT_POST => true,
-    CURLOPT_POSTFIELDS => json_encode(array('merTradeNo' => $v['merTradeNo'])),
+    CURLOPT_POSTFIELDS => json_encode(array('merTradeNo' => $merTradeNo)),
     CURLOPT_HTTPHEADER => array(
         'Content-Type: application/json',
         'X-API-Key: ' . BACKEND_API_KEY,

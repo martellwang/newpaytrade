@@ -11,6 +11,7 @@
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/pos_auth.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -29,15 +30,34 @@ try {
     $conn = db_connect();
     db_create_app_settings_table_if_not_exists($conn);
     $timeServer = db_get_setting($conn, 'time_server', '');
+
+    /*
+     * 商店層設定（可選）：有帶收銀機登入 token 且解析得到商店時，一併回傳
+     * 該店的設定。沒帶或解析失敗就略過 —— 這支的基本功能（校時）不綁商店，
+     * 不能因為 token 過期就整支失敗。
+     */
+    $scanTorch = null;
+    $posToken = isset($_SERVER['HTTP_X_POS_TOKEN']) ? $_SERVER['HTTP_X_POS_TOKEN'] : '';
+    if ($posToken !== '') {
+        $identity = pos_resolve_identity($posToken, false);
+        if ($identity['ok'] && !empty($identity['storeId'])) {
+            $scanTorch = db_get_store_scan_torch($conn, (int) $identity['storeId']);
+        }
+    }
 } catch (Exception $e) {
     error_log('pos-config 讀取設定失敗：' . $e->getMessage());
     respond(500, array('status' => 'failed', 'message' => '系統忙碌，請稍後再試'));
 }
 
-respond(200, array(
+$body = array(
     'status' => 'success',
     // 校時用的時間伺服器（NTP）。空字串代表後台未設定 = 停用校時。
     'timeServer' => $timeServer,
     // 伺服器目前時間（epoch 毫秒），供 App 備援校時與比對用
     'serverTimeMs' => (int) round(microtime(true) * 1000),
-));
+);
+if ($scanTorch !== null) {
+    // 掃碼（退款 QR 等）時是否開啟相機照明燈。預設開。
+    $body['scanTorch'] = $scanTorch;
+}
+respond(200, $body);

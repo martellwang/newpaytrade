@@ -32,8 +32,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ((isset($_POST['action']) ? $_POST['action'] : '') === 'set_print_options') {
             $stub = isset($_POST['print_merchant_copy']) && $_POST['print_merchant_copy'] === '1';
             $qr = isset($_POST['print_refund_qr']) && $_POST['print_refund_qr'] === '1';
+            $scan = isset($_POST['print_scan_pay']) && $_POST['print_scan_pay'] === '1';
+            $torch = isset($_POST['scan_torch']) && $_POST['scan_torch'] === '1';
             db_save_store_print_merchant_copy($conn, $sid, $stub);
             db_save_store_print_refund_qr($conn, $sid, $qr);
+            db_save_store_print_scan_pay($conn, $sid, $scan);
+            db_save_store_scan_torch($conn, $sid, $torch);
             $flashOk = true; $flash = '已更新列印設定';
         } elseif (!isset($_FILES['logo']) || $_FILES['logo']['error'] !== UPLOAD_ERR_OK) {
             $flash = '請選擇要上傳的圖檔';
@@ -120,6 +124,8 @@ portal_header('商店與店員', 'stores.php');
   <?php
     $printStub = db_get_store_print_merchant_copy($conn, (int) $st['id']);
     $printQr = db_get_store_print_refund_qr($conn, (int) $st['id']);
+    $printScan = db_get_store_print_scan_pay($conn, (int) $st['id']);
+    $scanTorch = db_get_store_scan_torch($conn, (int) $st['id']);
   ?>
   <form method="post" style="margin-top:10px">
     <input type="hidden" name="csrf" value="<?= h(portal_csrf_token()) ?>">
@@ -140,6 +146,22 @@ portal_header('商店與店員', 'stores.php');
         收執聯印<strong>掃碼退款 QR</strong>
       </label>
       <span class="muted" style="font-size:12px">不喜歡現場退款、偏好由後台退的商店可關掉。</span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;font-size:14px;margin-top:6px">
+      <label style="display:flex;gap:6px;align-items:center">
+        <input type="checkbox" name="print_scan_pay" value="1" <?= $printScan ? 'checked' : '' ?>
+               onchange="this.form.submit()">
+        <strong>掃碼收款</strong>也列印簽單
+      </label>
+      <span class="muted" style="font-size:12px">預設關閉。開啟後 LINE Pay／行動支付收款也會依上面的存根聯／收執聯設定列印。</span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;font-size:14px;margin-top:6px">
+      <label style="display:flex;gap:6px;align-items:center">
+        <input type="checkbox" name="scan_torch" value="1" <?= $scanTorch ? 'checked' : '' ?>
+               onchange="this.form.submit()">
+        掃碼時開啟<strong>照明燈</strong>
+      </label>
+      <span class="muted" style="font-size:12px">預設開。收銀機掃退款 QR 時打開鏡頭旁的補光燈，加快辨識；環境明亮可關。</span>
     </div>
   </form>
 

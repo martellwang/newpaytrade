@@ -40,6 +40,8 @@ try {
     $logo = $storeId ? db_get_store_logo($conn, $storeId) : null;
     $printMerchantCopy = $storeId ? db_get_store_print_merchant_copy($conn, $storeId) : true;
     $printRefundQr = $storeId ? db_get_store_print_refund_qr($conn, $storeId) : true;
+    // 掃碼收款是否列印簽單。與刷卡分開，預設關閉。
+    $printScanPay = $storeId ? db_get_store_print_scan_pay($conn, $storeId) : false;
     // 存根聯要加簽名欄的金額門檻（含）。可由 app_settings 調整，預設 3000。
     $signatureThreshold = (int) db_get_setting($conn, 'receipt_signature_threshold', 3000);
 } catch (Exception $e) {
@@ -60,6 +62,8 @@ respond(200, array(
     'printMerchantCopy' => $printMerchantCopy,
     // 收執聯下方要不要印掃碼退款 QR（QR 內容 = 交易回應帶的 refundToken）
     'printRefundQr' => $printRefundQr,
+    // 掃碼收款（LINE Pay／行動支付）要不要列印簽單。與刷卡分開，預設關閉。
+    'printScanPay' => $printScanPay,
     // 存根聯專用：金額 >= 這個數字時，在存根聯尾端加「持卡人簽名欄」，
     // 讓店員撕下給客人簽名後收回留存。0 = 一律不加。
     'signatureThreshold' => $signatureThreshold,

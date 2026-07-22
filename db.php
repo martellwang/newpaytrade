@@ -693,6 +693,12 @@ function db_create_merchants_table_if_not_exists($conn) {
         // 收執聯下方是否印「掃碼退款 QR」。預設印；不喜歡現場退款、偏好由後台退的
         // 商店可以關掉。
         'print_refund_qr' => "ALTER TABLE merchant_stores ADD COLUMN print_refund_qr TINYINT(1) NOT NULL DEFAULT 1",
+        // 掃碼收款（LINE Pay／行動支付）是否列印簽單。與刷卡的列印開關**分開**，
+        // 且**預設關閉**（DEFAULT 0）—— 掃碼收款多半不需要紙本簽單，要的商店再開。
+        'print_scan_pay' => "ALTER TABLE merchant_stores ADD COLUMN print_scan_pay TINYINT(1) NOT NULL DEFAULT 0",
+        // 收銀機掃碼（退款 QR 等）時是否開啟相機照明燈。i9100 鏡頭旁有補光燈，
+        // 開燈能加快辨識。預設開；燈光刺眼或環境明亮的店可關。
+        'scan_torch' => "ALTER TABLE merchant_stores ADD COLUMN scan_torch TINYINT(1) NOT NULL DEFAULT 1",
     );
     foreach ($storeCols as $col => $ddl) {
         $res = mysqli_query($conn, "SHOW COLUMNS FROM merchant_stores LIKE '$col'");
@@ -1036,6 +1042,46 @@ function db_save_store_print_refund_qr($conn, $storeId, $enabled) {
     mysqli_stmt_bind_param($stmt, 'ii', $val, $storeId);
     if (!mysqli_stmt_execute($stmt)) {
         throw new Exception('儲存退款 QR 設定失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+// 掃碼收款是否列印簽單。與刷卡分開，預設關閉（查不到店時回 false）。
+function db_get_store_print_scan_pay($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT print_scan_pay FROM merchant_stores WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ? ((int) $row['print_scan_pay'] === 1) : false;
+}
+
+function db_save_store_print_scan_pay($conn, $storeId, $enabled) {
+    $val = $enabled ? 1 : 0;
+    $stmt = mysqli_prepare($conn, 'UPDATE merchant_stores SET print_scan_pay = ? WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'ii', $val, $storeId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存掃碼收款列印設定失敗：' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+}
+
+// 掃碼時是否開啟相機照明燈。預設開（查不到店也回 true）。
+function db_get_store_scan_torch($conn, $storeId) {
+    $stmt = mysqli_prepare($conn, 'SELECT scan_torch FROM merchant_stores WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'i', $storeId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row ? ((int) $row['scan_torch'] === 1) : true;
+}
+
+function db_save_store_scan_torch($conn, $storeId, $enabled) {
+    $val = $enabled ? 1 : 0;
+    $stmt = mysqli_prepare($conn, 'UPDATE merchant_stores SET scan_torch = ? WHERE id = ?');
+    mysqli_stmt_bind_param($stmt, 'ii', $val, $storeId);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception('儲存掃碼照明設定失敗：' . mysqli_stmt_error($stmt));
     }
     mysqli_stmt_close($stmt);
 }

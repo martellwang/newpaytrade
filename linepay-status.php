@@ -19,8 +19,24 @@ require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/payuni_query.php';
 require_once __DIR__ . '/pos_auth.php';
+require_once __DIR__ . '/refund_token.php';
 
 header('Content-Type: application/json; charset=utf-8');
+
+/**
+ * 掃碼收款成功時，補上收銀機列印收執聯需要的欄位：
+ *   storeOrderNo（商店訂單編號）、refundToken（收執聯退款 QR 內容）。
+ * 只有 success 才給 refundToken —— 沒成交的交易不該產出可退款的憑證。
+ */
+function scan_success_extras($order) {
+    $extras = array(
+        'storeOrderNo' => isset($order['store_order_no']) ? $order['store_order_no'] : null,
+    );
+    if (isset($order['store_id']) && $order['store_id'] !== null) {
+        $extras['refundToken'] = refund_token_make($order['mer_trade_no'], (int) $order['store_id']);
+    }
+    return $extras;
+}
 
 function respond($statusCode, $body) {
     http_response_code($statusCode);
@@ -77,13 +93,17 @@ if ((int) $order['store_id'] !== $identity['storeId']) {
  * 後續的詢問都停在資料庫這一層，不會持續消耗 PAYUNi 的查詢額度。
  */
 if (in_array($order['status'], array('success', 'failed'), true)) {
-    respond(200, array(
+    $body = array(
         'status' => $order['status'],
         'merTradeNo' => $merTradeNo,
         'payuniTradeNo' => $order['payuni_trade_no'],
         'amount' => (int) $order['amount'],
         'message' => $order['message'],
-    ));
+    );
+    if ($order['status'] === 'success') {
+        $body = array_merge($body, scan_success_extras($order));
+    }
+    respond(200, $body);
 }
 
 // 用這家商店自己的代號查 —— 拿別家的代號去查只會查無資料
@@ -162,11 +182,15 @@ if ($order['status'] !== $localStatus) {
     }
 }
 
-respond(200, array(
+$body = array(
     'status' => $localStatus,
     'merTradeNo' => $merTradeNo,
     'payuniTradeNo' => $payuniTradeNo,
     'amount' => (int) $order['amount'],
     'tradeStatus' => $tradeStatus,
     'message' => isset($tradeStatusText[$tradeStatus]) ? $tradeStatusText[$tradeStatus] : null,
-));
+);
+if ($localStatus === 'success') {
+    $body = array_merge($body, scan_success_extras($order));
+}
+respond(200, $body);
