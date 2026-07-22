@@ -486,6 +486,75 @@ function db_count_devices($conn) {
     return (int) mysqli_fetch_assoc($r)['c'];
 }
 
+/**
+ * POS 機隊統計（依廠牌型號彙整）：入倉數量、存活狀態、交易量。
+ *
+ * 存活狀態用 last_seen 分桶（online=近 $onlineMin 分鐘、idle=近 $idleHr 小時、
+ * offline=更久）。⚠️ last_seen 目前只在「交易」時更新，所以這其實是「最近活動」
+ * 而非真正的「開機中」——要真正即時的開機存活需要另加心跳（app 定時 ping），
+ * 見 docs/backlog。交易量另以 orders JOIN devices 依型號彙整。
+ *
+ * 回傳每列：brand, model, device_count, enrolled_count, online_cnt, idle_cnt,
+ *           offline_cnt, tx_count, success_amt。
+ */
+function db_device_fleet_stats($conn, $onlineMin = 10, $idleHr = 24) {
+    $brandExpr = "COALESCE(NULLIF(d.brand,''), NULLIF(d.manufacturer,''), '未知')";
+    $onlineMin = (int) $onlineMin;
+    $idleHr = (int) $idleHr;
+
+    // 依型號的機台數、入倉數、存活分桶
+    $sqlDev = "
+        SELECT $brandExpr AS brand, COALESCE(d.model,'') AS model,
+               COUNT(*) AS device_count,
+               SUM(d.enrolled_at IS NOT NULL) AS enrolled_count,
+               SUM(TIMESTAMPDIFF(MINUTE, d.last_seen, NOW()) <= $onlineMin) AS online_cnt,
+               SUM(TIMESTAMPDIFF(MINUTE, d.last_seen, NOW()) > $onlineMin
+                   AND TIMESTAMPDIFF(HOUR, d.last_seen, NOW()) <= $idleHr) AS idle_cnt,
+               SUM(TIMESTAMPDIFF(HOUR, d.last_seen, NOW()) > $idleHr) AS offline_cnt
+        FROM devices d
+        GROUP BY brand, model
+    ";
+    $rows = array();
+    $res = mysqli_query($conn, $sqlDev);
+    while ($res && ($r = mysqli_fetch_assoc($res))) {
+        $rows[$r['brand'] . '|' . $r['model']] = array(
+            'brand' => $r['brand'], 'model' => $r['model'],
+            'device_count' => (int) $r['device_count'],
+            'enrolled_count' => (int) $r['enrolled_count'],
+            'online_cnt' => (int) $r['online_cnt'],
+            'idle_cnt' => (int) $r['idle_cnt'],
+            'offline_cnt' => (int) $r['offline_cnt'],
+            'tx_count' => 0, 'success_amt' => 0,
+        );
+    }
+
+    // 依型號的交易量（orders JOIN devices）
+    $sqlTx = "
+        SELECT $brandExpr AS brand, COALESCE(d.model,'') AS model,
+               COUNT(*) AS tx_count,
+               COALESCE(SUM(CASE WHEN o.status='success' THEN o.amount ELSE 0 END),0) AS success_amt
+        FROM orders o JOIN devices d ON d.device_id = o.device_id
+        GROUP BY brand, model
+    ";
+    $res2 = mysqli_query($conn, $sqlTx);
+    while ($res2 && ($r = mysqli_fetch_assoc($res2))) {
+        $k = $r['brand'] . '|' . $r['model'];
+        if (!isset($rows[$k])) {
+            $rows[$k] = array('brand' => $r['brand'], 'model' => $r['model'],
+                'device_count' => 0, 'enrolled_count' => 0,
+                'online_cnt' => 0, 'idle_cnt' => 0, 'offline_cnt' => 0,
+                'tx_count' => 0, 'success_amt' => 0);
+        }
+        $rows[$k]['tx_count'] = (int) $r['tx_count'];
+        $rows[$k]['success_amt'] = (int) $r['success_amt'];
+    }
+
+    // 依機台數多到少排序
+    $out = array_values($rows);
+    usort($out, function ($a, $b) { return $b['device_count'] - $a['device_count']; });
+    return $out;
+}
+
 /** 交易送出前先寫一筆 pending 紀錄，拿到 PAYUNi 回應後再更新 */
 /**
  * 商店開通狀態的快取表。
@@ -2478,4 +2547,208 @@ function db_list_refunds($conn, $merTradeNo) {
     }
     mysqli_stmt_close($stmt);
     return $rows;
+}
+
+// ── 設備型號開發追蹤台 ──────────────────────────────────────────
+//
+// 由「開發」在後台維護：各廠牌型號的能力檢查清單（測試進度）、狀態更新
+// 紀錄（韌體更版／拿到 SDK 就能洗刷冤名），以及韌體／SDK／文件等開發元件
+// 檔案。四張表：型號、能力狀態、狀態紀錄、檔案。
+
+function db_create_device_model_tables_if_not_exists($conn) {
+    mysqli_query($conn, "CREATE TABLE IF NOT EXISTS device_models (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        brand VARCHAR(64) NOT NULL,
+        model VARCHAR(64) NOT NULL,
+        sort INT NOT NULL DEFAULT 0,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        notes TEXT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_brand_model (brand, model)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    mysqli_query($conn, "CREATE TABLE IF NOT EXISTS device_model_caps (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        model_id INT NOT NULL,
+        cap_key VARCHAR(32) NOT NULL,
+        state VARCHAR(16) NOT NULL DEFAULT 'untested',
+        detail VARCHAR(255) NULL,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_model_cap (model_id, cap_key),
+        INDEX idx_model (model_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    mysqli_query($conn, "CREATE TABLE IF NOT EXISTS device_model_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        model_id INT NOT NULL,
+        note TEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_model (model_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    mysqli_query($conn, "CREATE TABLE IF NOT EXISTS device_model_files (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        model_id INT NOT NULL,
+        kind VARCHAR(16) NOT NULL DEFAULT 'other',
+        orig_name VARCHAR(255) NOT NULL,
+        stored_name VARCHAR(255) NOT NULL,
+        size_bytes BIGINT NOT NULL DEFAULT 0,
+        uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_model (model_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+    $res = mysqli_query($conn, "SELECT COUNT(*) c FROM device_models");
+    $row = $res ? mysqli_fetch_assoc($res) : array('c' => 1);
+    if ((int) $row['c'] === 0) {
+        db_seed_device_models($conn);
+    }
+}
+
+function db_seed_device_models($conn) {
+    $seed = array(
+        array('Urovo', 'i9100', 10, 'verified',
+            '開放平台。感應信用卡 EMV、熱感列印（雙聯＋退款 QR）、掃碼／感應／人工三種退款、掃碼照明燈、OTA 皆實機驗證通過。目前主力機。',
+            array('contactless' => array('pass', 'PiccManager'), 'print' => array('pass', 'PrinterManager'),
+                  'torch' => array('pass', '有補光燈'), 'ota' => array('pass', '支援'), 'stdnfc' => array('na', '無'))),
+        array('Nexgo（新國都）', 'N5', 20, 'blocked',
+            '二手機、無原廠窗口。sepos 安全模組鎖定：熱感列印（SPI EACCES）與 OTA 自我安裝（剖析錯誤）皆無法，只能 adb/USB 更新。感應讀卡（DDI）可用。',
+            array('contactless' => array('pass', 'DDI'), 'print' => array('blocked', '鎖定 ROM'),
+                  'torch' => array('untested', ''), 'ota' => array('blocked', '需 USB'), 'stdnfc' => array('na', '無'))),
+        array('Ingenico', 'APOS A8', 30, 'pending',
+            '待簽章授權，尚未啟用。硬體走廠商 AIDL（DeviceService），需比照各機型重新對接感應與列印。',
+            array('contactless' => array('untested', ''), 'print' => array('untested', ''),
+                  'torch' => array('untested', ''), 'ota' => array('untested', ''), 'stdnfc' => array('untested', ''))),
+    );
+    foreach ($seed as $s) {
+        $stmt = mysqli_prepare($conn, "INSERT INTO device_models (brand, model, sort, status, notes) VALUES (?,?,?,?,?)");
+        mysqli_stmt_bind_param($stmt, 'ssiss', $s[0], $s[1], $s[2], $s[3], $s[4]);
+        mysqli_stmt_execute($stmt);
+        $mid = mysqli_insert_id($conn);
+        mysqli_stmt_close($stmt);
+        foreach ($s[5] as $capKey => $cs) {
+            $st = mysqli_prepare($conn, "INSERT INTO device_model_caps (model_id, cap_key, state, detail) VALUES (?,?,?,?)");
+            mysqli_stmt_bind_param($st, 'isss', $mid, $capKey, $cs[0], $cs[1]);
+            mysqli_stmt_execute($st);
+            mysqli_stmt_close($st);
+        }
+    }
+}
+
+function db_list_device_models($conn) {
+    $rows = array();
+    $res = mysqli_query($conn, "SELECT * FROM device_models ORDER BY sort, brand, model");
+    while ($res && ($r = mysqli_fetch_assoc($res))) $rows[] = $r;
+    return $rows;
+}
+
+function db_get_device_model($conn, $id) {
+    $stmt = mysqli_prepare($conn, "SELECT * FROM device_models WHERE id = ?");
+    mysqli_stmt_bind_param($stmt, 'i', $id);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
+}
+
+function db_get_device_model_caps($conn, $modelId) {
+    $out = array();
+    $stmt = mysqli_prepare($conn, "SELECT cap_key, state, detail FROM device_model_caps WHERE model_id = ?");
+    mysqli_stmt_bind_param($stmt, 'i', $modelId);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    while ($r = mysqli_fetch_assoc($res)) $out[$r['cap_key']] = $r;
+    mysqli_stmt_close($stmt);
+    return $out;
+}
+
+function db_set_device_model_cap($conn, $modelId, $capKey, $state, $detail) {
+    $stmt = mysqli_prepare($conn,
+        "INSERT INTO device_model_caps (model_id, cap_key, state, detail) VALUES (?,?,?,?)
+         ON DUPLICATE KEY UPDATE state = VALUES(state), detail = VALUES(detail)");
+    mysqli_stmt_bind_param($stmt, 'isss', $modelId, $capKey, $state, $detail);
+    $ok = mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+    if (!$ok) throw new Exception('更新能力狀態失敗');
+}
+
+function db_update_device_model_status($conn, $modelId, $status, $notes) {
+    $stmt = mysqli_prepare($conn, "UPDATE device_models SET status = ?, notes = ? WHERE id = ?");
+    mysqli_stmt_bind_param($stmt, 'ssi', $status, $notes, $modelId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+function db_add_device_model($conn, $brand, $model, $sort) {
+    $stmt = mysqli_prepare($conn, "INSERT INTO device_models (brand, model, sort) VALUES (?,?,?)");
+    mysqli_stmt_bind_param($stmt, 'ssi', $brand, $model, $sort);
+    $ok = mysqli_stmt_execute($stmt);
+    $id = mysqli_insert_id($conn);
+    mysqli_stmt_close($stmt);
+    if (!$ok) throw new Exception('新增型號失敗（可能已存在相同廠牌型號）');
+    return $id;
+}
+
+function db_add_device_model_log($conn, $modelId, $note) {
+    $stmt = mysqli_prepare($conn, "INSERT INTO device_model_log (model_id, note) VALUES (?,?)");
+    mysqli_stmt_bind_param($stmt, 'is', $modelId, $note);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+function db_list_device_model_log($conn, $modelId, $limit = 20) {
+    $rows = array();
+    $stmt = mysqli_prepare($conn,
+        "SELECT note, created_at FROM device_model_log WHERE model_id = ? ORDER BY id DESC LIMIT ?");
+    mysqli_stmt_bind_param($stmt, 'ii', $modelId, $limit);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    while ($r = mysqli_fetch_assoc($res)) $rows[] = $r;
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+function db_add_device_model_file($conn, $modelId, $kind, $origName, $storedName, $size) {
+    $stmt = mysqli_prepare($conn,
+        "INSERT INTO device_model_files (model_id, kind, orig_name, stored_name, size_bytes) VALUES (?,?,?,?,?)");
+    mysqli_stmt_bind_param($stmt, 'isssi', $modelId, $kind, $origName, $storedName, $size);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+function db_list_device_model_files($conn, $modelId) {
+    $rows = array();
+    $stmt = mysqli_prepare($conn,
+        "SELECT id, kind, orig_name, stored_name, size_bytes, uploaded_at FROM device_model_files WHERE model_id = ? ORDER BY id DESC");
+    mysqli_stmt_bind_param($stmt, 'i', $modelId);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+    while ($r = mysqli_fetch_assoc($res)) $rows[] = $r;
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+function db_get_device_model_file($conn, $fileId) {
+    $stmt = mysqli_prepare($conn, "SELECT * FROM device_model_files WHERE id = ?");
+    mysqli_stmt_bind_param($stmt, 'i', $fileId);
+    mysqli_stmt_execute($stmt);
+    $row = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+    mysqli_stmt_close($stmt);
+    return $row;
+}
+
+function db_delete_device_model_file($conn, $fileId) {
+    $stmt = mysqli_prepare($conn, "DELETE FROM device_model_files WHERE id = ?");
+    mysqli_stmt_bind_param($stmt, 'i', $fileId);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+}
+
+/**
+ * 設備型號開發元件檔案的實體存放根目錄（在 web 根目錄外的私有區）。
+ * __DIR__ = newpaytrade/，往上兩層到帳號家目錄下的 private/。
+ * 與 pos-apk.php 的 ~/private/apk 同一套私有區概念。
+ */
+function device_model_files_dir() {
+    return __DIR__ . '/../../private/device_models';
 }
