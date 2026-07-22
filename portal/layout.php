@@ -31,8 +31,10 @@ function portal_header($title, $active = '') {
 * { box-sizing:border-box; }
 body { font-family:-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif;
        margin:0; background:#f5f5f7; color:#1c1c1e; }
+/* 最上的導覽列固定不捲動（全站版面規範，與總後台一致） */
 header { background:#00695c; color:#fff; padding:12px 20px; display:flex;
-         align-items:center; gap:20px; flex-wrap:wrap; }
+         align-items:center; gap:20px; flex-wrap:wrap;
+         position:sticky; top:0; z-index:30; }
 header h1 { font-size:16px; margin:0; }
 header .who { font-size:12px; color:#c8e6df; }
 header nav a { color:#c8e6df; text-decoration:none; margin-right:16px; font-size:15px; }
@@ -64,6 +66,22 @@ button { padding:8px 18px; border:0; border-radius:6px; background:#00695c;
 .muted { color:#888; font-size:13px; }
 .right { text-align:right; }
 .pager { display:flex; align-items:center; gap:12px; }
+
+/* ── 左右分欄版面（全站版面規範，與總後台一致）───────────────
+   左邊固定寬的功能選單、右邊內容；捲動時左欄與上方導覽都固定不動。 */
+.split { display:flex; gap:18px; align-items:flex-start; }
+.split-nav { flex:0 0 200px; background:#fff; border-radius:10px; padding:10px;
+             box-shadow:0 1px 4px rgba(0,0,0,.06);
+             position:sticky; top:70px; align-self:flex-start;
+             max-height:calc(100vh - 88px); overflow-y:auto; }
+.split-body { flex:1; min-width:0; }
+.split-nav .grp { font-size:12px; color:#999; padding:10px 10px 4px; font-weight:600; }
+.split-nav a { display:block; padding:9px 12px; border-radius:8px; text-decoration:none;
+               color:#333; font-size:14px; margin-bottom:2px; }
+.split-nav a:hover { background:#eef5f3; }
+.split-nav a.on { background:#00695c; color:#fff; font-weight:600; }
+.split-nav a.sub { padding-left:22px; font-size:13px; }
+@media (max-width:760px){ .split{flex-direction:column} .split-nav{flex-basis:auto;width:100%} }
 </style>
 </head>
 <body>
@@ -93,6 +111,32 @@ function portal_footer() {
 
 if (!function_exists('money')) {
     function money($n) { return 'NT$ ' . number_format((int) $n); }
+}
+
+/**
+ * 左右分欄的左側功能選單（與總後台 admin_render_split_nav 同一套用法）。
+ * $nodes 每項：array('label'=>..,'key'=>..) 可點項，或 array('label'=>..,'children'=>array(key=>label)) 群組。
+ * 點選以 ?section=<key> 帶回同一頁；$active 是目前選中的 key；$baseUrl 是頁面檔名。
+ */
+if (!function_exists('portal_render_split_nav')) {
+    function portal_render_split_nav($nodes, $active, $baseUrl) {
+        echo '<nav class="split-nav">';
+        foreach ($nodes as $node) {
+            if (isset($node['key'])) {
+                $on = ($node['key'] === $active) ? ' on' : '';
+                echo '<a class="' . $on . '" href="' . h($baseUrl) . '?section=' . h(urlencode($node['key'])) . '">'
+                    . h($node['label']) . '</a>';
+            } else {
+                echo '<div class="grp">' . h($node['label']) . '</div>';
+                foreach ($node['children'] as $key => $label) {
+                    $on = ($key === $active) ? ' on' : '';
+                    echo '<a class="sub' . $on . '" href="' . h($baseUrl) . '?section=' . h(urlencode($key)) . '">'
+                        . h($label) . '</a>';
+                }
+            }
+        }
+        echo '</nav>';
+    }
 }
 
 /**

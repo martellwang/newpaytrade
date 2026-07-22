@@ -28,8 +28,10 @@ function admin_header($title, $active = '') {
 * { box-sizing: border-box; }
 body { font-family:-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif;
        margin:0; background:#f5f5f7; color:#1c1c1e; }
+/* 最上的主選單列固定不捲動：內容再長，導覽永遠在最上方 */
 header { background:#5a3d99; color:#fff; padding:12px 20px; display:flex;
-         align-items:center; gap:20px; flex-wrap:wrap; }
+         align-items:center; gap:20px; flex-wrap:wrap;
+         position:sticky; top:0; z-index:30; }
 header h1 { font-size:17px; margin:0; }
 header nav a { color:#e6dcff; text-decoration:none; margin-right:16px; font-size:15px; }
 header nav a.on { color:#fff; font-weight:bold; border-bottom:2px solid #fff; padding-bottom:2px; }
@@ -74,8 +76,12 @@ button { padding:8px 18px; border:0; border-radius:6px; background:#5a3d99;
  * 左邊固定寬的功能選單，右邊是內容。窄螢幕時上下堆疊。
  * 這個管理平台是給桌機用的，小螢幕只求不破版、能捲。 */
 .split { display:flex; gap:18px; align-items:flex-start; }
+/* 左側功能選單固定不捲動：黏在主選單列下方，右側內容自己捲。
+   align-self:flex-start 讓它不被 flex 拉伸滿高，sticky 才有作用。 */
 .split-nav { flex:0 0 200px; background:#fff; border-radius:10px; padding:10px;
-             box-shadow:0 1px 4px rgba(0,0,0,.06); }
+             box-shadow:0 1px 4px rgba(0,0,0,.06);
+             position:sticky; top:70px; align-self:flex-start;
+             max-height:calc(100vh - 88px); overflow-y:auto; }
 .split-body { flex:1; min-width:0; }   /* min-width:0 讓右欄的寬表格能自己捲，不撐破版面 */
 .split-nav .grp { font-size:12px; color:#999; padding:10px 10px 4px; font-weight:600; }
 .split-nav a { display:block; padding:9px 12px; border-radius:8px; text-decoration:none;
